@@ -187,6 +187,7 @@ import org.elasticsearch.xpack.esql.plan.logical.highlight.HighlightAnalyzers;
 import org.elasticsearch.xpack.esql.plan.logical.inference.DenseVector;
 import org.elasticsearch.xpack.esql.plan.physical.AggregateExec;
 import org.elasticsearch.xpack.esql.plan.physical.ChangePointExec;
+import org.elasticsearch.xpack.esql.plan.physical.ColocatedJoinExec;
 import org.elasticsearch.xpack.esql.plan.physical.CompoundOutputEvalExec;
 import org.elasticsearch.xpack.esql.plan.physical.DissectExec;
 import org.elasticsearch.xpack.esql.plan.physical.DistinctByExec;
@@ -260,6 +261,7 @@ import java.util.SequencedMap;
 import java.util.Set;
 import java.util.concurrent.Executor;
 import java.util.function.Function;
+import java.util.function.IntUnaryOperator;
 import java.util.function.Supplier;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
@@ -526,6 +528,8 @@ public class LocalExecutionPlanner {
             return planDistinctBy(distinctBy, context);
         } else if (node instanceof LookupJoinExec join) {
             return planLookupJoin(join, context);
+        } else if (node instanceof ColocatedJoinExec join) {
+            return planColocatedJoin(join, context);
         }
         // output
         else if (node instanceof StreamingOutputExec streamingOutput) {
@@ -1878,6 +1882,81 @@ public class LocalExecutionPlanner {
                 context.queryPragmas().exchangeBufferSize(),
                 configuration.profile(),
                 configuration
+            ),
+            layout
+        );
+    }
+
+    /**
+     * Plans a co-located join as a lookup against the partner shard on this node. Same operator chain as a lookup join; the
+     * differences are that the right index is a regular multi-shard index, the target shard is chosen per left page (same
+     * shard number as the page's left shard, read from its {@code _doc} column), and the lookup runs on the local node.
+     */
+    private PhysicalOperation planColocatedJoin(ColocatedJoinExec join, LocalExecutionPlannerContext context) {
+        PhysicalOperation source = plan(join.left(), context);
+        Layout.Builder layoutBuilder = source.layout.builder();
+        for (Attribute f : join.loadedAttributes()) {
+            layoutBuilder.append(f);
+        }
+        Layout layout = layoutBuilder.build();
+
+        EsRelation esRelation = findEsRelation(join.right());
+        if (esRelation == null) {
+            throw new IllegalArgumentException("can't plan [" + join + "]: no relation on the right side");
+        }
+        List<String> localIndices = esRelation.concreteIndices().get(RemoteClusterAware.LOCAL_CLUSTER_GROUP_KEY);
+        if (localIndices == null || localIndices.size() != 1) {
+            throw new IllegalArgumentException(
+                "can't plan [" + join + "]: expected a single local index, found " + esRelation.concreteIndices()
+            );
+        }
+        String indexName = localIndices.get(0);
+        if (join.leftFields().size() != 1 || join.rightFields().size() != 1) {
+            throw new IllegalArgumentException("can't plan [" + join + "]: expected a single join key");
+        }
+        TypedAttribute left = (TypedAttribute) join.leftFields().get(0);
+        FieldAttribute right = (FieldAttribute) join.rightFields().get(0);
+        Layout.ChannelAndType input = source.layout.get(left.id());
+        if (input == null) {
+            throw new IllegalArgumentException("can't plan [" + join + "][" + left + "]");
+        }
+        List<MatchConfig> matchFields = List.of(new MatchConfig(right.exactAttribute().fieldName().string(), input));
+
+        Attribute docAttribute = join.left()
+            .output()
+            .stream()
+            .filter(EsQueryExec::isDocAttribute)
+            .findFirst()
+            .orElseThrow(() -> new IllegalArgumentException("can't plan [" + join + "]: no _doc column on the left side"));
+        Layout.ChannelAndType docChannel = source.layout.get(docAttribute.id());
+        if (docChannel == null) {
+            throw new IllegalArgumentException("can't plan [" + join + "]: _doc is not in the layout");
+        }
+        if (physicalOperationProviders instanceof EsPhysicalOperationProviders == false) {
+            throw new IllegalArgumentException("can't plan [" + join + "]: no shard contexts");
+        }
+        EsPhysicalOperationProviders esProviders = (EsPhysicalOperationProviders) physicalOperationProviders;
+        IntUnaryOperator leftShardNumber = shardIndex -> esProviders.shardId(shardIndex).id();
+
+        return source.with(
+            new LookupFromIndexOperator.Factory(
+                matchFields,
+                sessionId,
+                parentTask,
+                context.queryPragmas().enrichMaxWorkers(),
+                ctx -> lookupFromIndexService,
+                esRelation.indexPattern(),
+                indexName,
+                join.loadFields(),
+                join.source(),
+                join.right(),
+                null,
+                false,
+                context.queryPragmas().exchangeBufferSize(),
+                configuration.profile(),
+                configuration,
+                docChannel.channel(),
+                leftShardNumber
             ),
             layout
         );

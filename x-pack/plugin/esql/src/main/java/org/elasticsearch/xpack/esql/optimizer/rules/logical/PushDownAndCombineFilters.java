@@ -33,6 +33,7 @@ import org.elasticsearch.xpack.esql.plan.logical.Project;
 import org.elasticsearch.xpack.esql.plan.logical.RegexExtract;
 import org.elasticsearch.xpack.esql.plan.logical.UnaryPlan;
 import org.elasticsearch.xpack.esql.plan.logical.inference.InferencePlan;
+import org.elasticsearch.xpack.esql.plan.logical.join.ColocatedJoin;
 import org.elasticsearch.xpack.esql.plan.logical.join.InlineJoin;
 import org.elasticsearch.xpack.esql.plan.logical.join.Join;
 import org.elasticsearch.xpack.esql.plan.logical.join.JoinTypes;
@@ -180,7 +181,8 @@ public final class PushDownAndCombineFilters extends OptimizerRules.Parameterize
         LogicalPlan plan = filter;
         // pushdown only through LEFT joins
         // TODO: generalize this for other join types
-        if (join.config().type() == JoinTypes.LEFT) {
+        // A co-located join is an inner join: pushing a side-scoped filter into that side is always valid.
+        if (join.config().type() == JoinTypes.LEFT || join instanceof ColocatedJoin) {
             LogicalPlan left = join.left();
             LogicalPlan right = join.right();
             var conjunctions = Predicates.splitAnd(filter.condition());

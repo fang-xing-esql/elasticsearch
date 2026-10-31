@@ -1790,6 +1790,18 @@ public class EsqlBaseParserBaseListener implements EsqlBaseParserListener {
    *
    * <p>The default implementation does nothing.</p>
    */
+  @Override public void enterColocatedJoinCommand(EsqlBaseParser.ColocatedJoinCommandContext ctx) { }
+  /**
+   * {@inheritDoc}
+   *
+   * <p>The default implementation does nothing.</p>
+   */
+  @Override public void exitColocatedJoinCommand(EsqlBaseParser.ColocatedJoinCommandContext ctx) { }
+  /**
+   * {@inheritDoc}
+   *
+   * <p>The default implementation does nothing.</p>
+   */
   @Override public void enterJoinTarget(EsqlBaseParser.JoinTargetContext ctx) { }
   /**
    * {@inheritDoc}

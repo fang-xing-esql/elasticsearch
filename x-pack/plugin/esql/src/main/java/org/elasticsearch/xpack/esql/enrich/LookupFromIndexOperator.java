@@ -14,6 +14,9 @@ import org.elasticsearch.common.io.stream.NamedWriteableRegistry;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.compute.data.Block;
+import org.elasticsearch.compute.data.DocBlock;
+import org.elasticsearch.compute.data.DocVector;
+import org.elasticsearch.compute.data.IntVector;
 import org.elasticsearch.compute.data.Page;
 import org.elasticsearch.compute.operator.AsyncOperator;
 import org.elasticsearch.compute.operator.DriverContext;
@@ -43,6 +46,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
+import java.util.function.IntUnaryOperator;
 
 // TODO rename package
 public final class LookupFromIndexOperator extends AsyncOperator<LookupFromIndexOperator.OngoingJoin> {
@@ -62,13 +66,64 @@ public final class LookupFromIndexOperator extends AsyncOperator<LookupFromIndex
         boolean useStreamingOperator,
         int exchangeBufferSize,
         boolean profile,
-        @Nullable Configuration configuration
+        @Nullable Configuration configuration,
+        /**
+         * Channel of the input page's {@code _doc} column, or {@code -1}. Only used with {@link #leftShardNumber}.
+         */
+        int docChannel,
+        /**
+         * Co-located join only: maps the shard index of an input page (from its {@code _doc} column) to a shard number of
+         * {@link #lookupIndex}, and the lookup then runs against exactly that shard on the local node. {@code null} for a
+         * regular lookup join, which targets the single shard of a lookup index wherever it is.
+         */
+        @Nullable IntUnaryOperator leftShardNumber
     ) implements OperatorFactory {
 
         public Factory {
             if (useStreamingOperator && configuration == null) {
                 throw new IllegalArgumentException("configuration is required for streaming lookup operator");
             }
+            if (useStreamingOperator && leftShardNumber != null) {
+                throw new IllegalArgumentException("co-located lookup does not support the streaming operator");
+            }
+        }
+
+        public Factory(
+            List<MatchConfig> matchFields,
+            String sessionId,
+            CancellableTask parentTask,
+            int maxOutstandingRequests,
+            Function<DriverContext, LookupFromIndexService> lookupService,
+            String lookupIndexPattern,
+            String lookupIndex,
+            List<NamedExpression> loadFields,
+            Source source,
+            PhysicalPlan rightPreJoinPlan,
+            Expression joinOnConditions,
+            boolean useStreamingOperator,
+            int exchangeBufferSize,
+            boolean profile,
+            @Nullable Configuration configuration
+        ) {
+            this(
+                matchFields,
+                sessionId,
+                parentTask,
+                maxOutstandingRequests,
+                lookupService,
+                lookupIndexPattern,
+                lookupIndex,
+                loadFields,
+                source,
+                rightPreJoinPlan,
+                joinOnConditions,
+                useStreamingOperator,
+                exchangeBufferSize,
+                profile,
+                configuration,
+                -1,
+                null
+            );
         }
 
         private String operatorName() {
@@ -89,6 +144,9 @@ public final class LookupFromIndexOperator extends AsyncOperator<LookupFromIndex
             }
             stringBuilder.append(" right_pre_join_plan=").append(rightPreJoinPlan == null ? "null" : rightPreJoinPlan.toString());
             stringBuilder.append(" join_on_expression=").append(joinOnConditions == null ? "null" : joinOnConditions.toString());
+            if (leftShardNumber != null) {
+                stringBuilder.append(" colocated=true");
+            }
             stringBuilder.append("]");
             return stringBuilder.toString();
         }
@@ -126,7 +184,9 @@ public final class LookupFromIndexOperator extends AsyncOperator<LookupFromIndex
                     loadFields,
                     source,
                     rightPreJoinPlan,
-                    joinOnConditions
+                    joinOnConditions,
+                    docChannel,
+                    leftShardNumber
                 );
             }
         }
@@ -143,6 +203,9 @@ public final class LookupFromIndexOperator extends AsyncOperator<LookupFromIndex
     private final List<MatchConfig> matchFields;
     private final PhysicalPlan rightPreJoinPlan;
     private final Expression joinOnConditions;
+    private final int docChannel;
+    @Nullable
+    private final IntUnaryOperator leftShardNumber;
     // MatchFieldsMapping is the same for all batches (based on operator configuration, not input pages)
     private final MatchFieldsMapping matchFieldsMapping;
     /**
@@ -173,7 +236,43 @@ public final class LookupFromIndexOperator extends AsyncOperator<LookupFromIndex
         PhysicalPlan rightPreJoinPlan,
         Expression joinOnConditions
     ) {
+        this(
+            matchFields,
+            sessionId,
+            driverContext,
+            parentTask,
+            maxOutstandingRequests,
+            lookupService,
+            lookupIndexPattern,
+            lookupIndex,
+            loadFields,
+            source,
+            rightPreJoinPlan,
+            joinOnConditions,
+            -1,
+            null
+        );
+    }
+
+    public LookupFromIndexOperator(
+        List<MatchConfig> matchFields,
+        String sessionId,
+        DriverContext driverContext,
+        CancellableTask parentTask,
+        int maxOutstandingRequests,
+        LookupFromIndexService lookupService,
+        String lookupIndexPattern,
+        String lookupIndex,
+        List<NamedExpression> loadFields,
+        Source source,
+        PhysicalPlan rightPreJoinPlan,
+        Expression joinOnConditions,
+        int docChannel,
+        @Nullable IntUnaryOperator leftShardNumber
+    ) {
         super(driverContext, lookupService.getThreadContext(), maxOutstandingRequests);
+        this.docChannel = docChannel;
+        this.leftShardNumber = leftShardNumber;
         this.matchFields = matchFields;
         this.sessionId = sessionId;
         this.parentTask = parentTask;
@@ -228,7 +327,7 @@ public final class LookupFromIndexOperator extends AsyncOperator<LookupFromIndex
             false, // profile - non-streaming lookup doesn't support plan output
             null // configuration - non-streaming lookup doesn't use planning pipeline
         );
-        lookupService.lookupAsync(request, parentTask, listener.map(response -> {
+        ActionListener<AbstractLookupService.LookupResponse> joinListener = listener.map(response -> {
             totalBytesRead.addAndGet(response.bytesRead());
             // Replay warnings accumulated by the (possibly remote) lookup driver.
             for (String warning : response.warnings()) {
@@ -236,7 +335,28 @@ public final class LookupFromIndexOperator extends AsyncOperator<LookupFromIndex
             }
             List<Page> pages = response.takePages();
             return new OngoingJoin(new RightChunkedLeftJoin(inputPage, loadFields.size()), pages.iterator());
-        }));
+        });
+        if (leftShardNumber != null) {
+            lookupService.lookupAsyncOnLocalShard(request, leftShardNumber.applyAsInt(shardIndexOf(inputPage)), parentTask, joinListener);
+        } else {
+            lookupService.lookupAsync(request, parentTask, joinListener);
+        }
+    }
+
+    /**
+     * The shard index (position in the request's shard contexts) the page was read from. Pages come from one Lucene slice, so
+     * one shard; a page spanning several shards cannot be joined against a single partner and is rejected.
+     */
+    private int shardIndexOf(Page page) {
+        DocVector docs = ((DocBlock) page.getBlock(docChannel)).asVector();
+        IntVector shards = docs.shards();
+        int first = shards.getInt(0);
+        for (int i = 1; i < shards.getPositionCount(); i++) {
+            if (shards.getInt(i) != first) {
+                throw new IllegalStateException("co-located join: input page spans shards [" + first + "] and [" + shards.getInt(i) + "]");
+            }
+        }
+        return first;
     }
 
     /**
@@ -315,6 +435,9 @@ public final class LookupFromIndexOperator extends AsyncOperator<LookupFromIndex
 
         stringBuilder.append(" right_pre_join_plan=").append(rightPreJoinPlan == null ? "null" : rightPreJoinPlan.toString());
         stringBuilder.append(" join_on_expression=").append(joinOnConditions == null ? "null" : joinOnConditions.toString());
+        if (leftShardNumber != null) {
+            stringBuilder.append(" colocated=true");
+        }
         stringBuilder.append("]");
         return stringBuilder.toString();
     }

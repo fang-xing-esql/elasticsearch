@@ -82,6 +82,7 @@ processingCommand
     | denseVectorCommand
     // in development
     | {this.isDevVersion()}? lookupCommand
+    | {this.isDevVersion()}? colocatedJoinCommand
     | dedupCommand
     | {this.isDevVersion()}? fillNullCommand
     ;

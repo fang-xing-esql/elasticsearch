@@ -10,7 +10,9 @@ package org.elasticsearch.xpack.esql.planner.mapper;
 import org.elasticsearch.compute.aggregation.AggregatorMode;
 import org.elasticsearch.index.IndexMode;
 import org.elasticsearch.xpack.esql.EsqlIllegalArgumentException;
+import org.elasticsearch.xpack.esql.core.expression.Alias;
 import org.elasticsearch.xpack.esql.core.expression.Attribute;
+import org.elasticsearch.xpack.esql.expression.predicate.nulls.IsNotNull;
 import org.elasticsearch.xpack.esql.plan.logical.Aggregate;
 import org.elasticsearch.xpack.esql.plan.logical.BinaryPlan;
 import org.elasticsearch.xpack.esql.plan.logical.EsRelation;
@@ -26,11 +28,14 @@ import org.elasticsearch.xpack.esql.plan.logical.TopN;
 import org.elasticsearch.xpack.esql.plan.logical.TopNBy;
 import org.elasticsearch.xpack.esql.plan.logical.TsInfo;
 import org.elasticsearch.xpack.esql.plan.logical.UnaryPlan;
+import org.elasticsearch.xpack.esql.plan.logical.join.ColocatedJoin;
 import org.elasticsearch.xpack.esql.plan.logical.join.Join;
 import org.elasticsearch.xpack.esql.plan.logical.join.JoinConfig;
 import org.elasticsearch.xpack.esql.plan.logical.join.JoinTypes;
 import org.elasticsearch.xpack.esql.plan.logical.local.LocalRelation;
+import org.elasticsearch.xpack.esql.plan.physical.ColocatedJoinExec;
 import org.elasticsearch.xpack.esql.plan.physical.EsSourceExec;
+import org.elasticsearch.xpack.esql.plan.physical.FilterExec;
 import org.elasticsearch.xpack.esql.plan.physical.FragmentExec;
 import org.elasticsearch.xpack.esql.plan.physical.HashJoinExec;
 import org.elasticsearch.xpack.esql.plan.physical.LimitByExec;
@@ -40,6 +45,7 @@ import org.elasticsearch.xpack.esql.plan.physical.LookupJoinExec;
 import org.elasticsearch.xpack.esql.plan.physical.MetricsInfoExec;
 import org.elasticsearch.xpack.esql.plan.physical.ParameterizedQueryExec;
 import org.elasticsearch.xpack.esql.plan.physical.PhysicalPlan;
+import org.elasticsearch.xpack.esql.plan.physical.ProjectExec;
 import org.elasticsearch.xpack.esql.plan.physical.TopNByExec;
 import org.elasticsearch.xpack.esql.plan.physical.TopNExec;
 import org.elasticsearch.xpack.esql.plan.physical.TsInfoExec;
@@ -146,7 +152,32 @@ public class LocalMapper {
         return MapperUtils.mapUnary(unary, mappedChild);
     }
 
+    /**
+     * The left side is scanned locally; the right side stays logical so the lookup service can turn it (filters included) into
+     * per-page queries against the partner shard. The lookup is a left join, so the right key is loaded under a synthetic name
+     * and rows without a match are filtered out, which gives the inner join semantics.
+     */
+    private PhysicalPlan mapColocatedJoin(ColocatedJoin join) {
+        PhysicalPlan left = map(join.left());
+        Attribute rightKey = join.config().rightFields().get(0);
+        Alias marker = new Alias(join.source(), "$$" + rightKey.name() + "$match", rightKey);
+        PhysicalPlan exec = new ColocatedJoinExec(
+            join.source(),
+            left,
+            new FragmentExec(join.right()),
+            join.config().leftFields(),
+            join.config().rightFields(),
+            join.rightOutputFields(),
+            marker
+        );
+        PhysicalPlan matched = new FilterExec(join.source(), exec, new IsNotNull(join.source(), marker.toAttribute()));
+        return new ProjectExec(join.source(), matched, join.output());
+    }
+
     private PhysicalPlan mapBinary(BinaryPlan binary) {
+        if (binary instanceof ColocatedJoin colocatedJoin) {
+            return mapColocatedJoin(colocatedJoin);
+        }
         // special handling for inlinejoin - join + subquery which has to be executed first (async) and replaced by its result
         if (binary instanceof Join join) {
             JoinConfig config = join.config();

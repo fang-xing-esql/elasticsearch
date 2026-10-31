@@ -1583,6 +1583,16 @@ public interface EsqlBaseParserListener extends ParseTreeListener {
    */
   void exitJoinCommand(EsqlBaseParser.JoinCommandContext ctx);
   /**
+   * Enter a parse tree produced by {@link EsqlBaseParser#colocatedJoinCommand}.
+   * @param ctx the parse tree
+   */
+  void enterColocatedJoinCommand(EsqlBaseParser.ColocatedJoinCommandContext ctx);
+  /**
+   * Exit a parse tree produced by {@link EsqlBaseParser#colocatedJoinCommand}.
+   * @param ctx the parse tree
+   */
+  void exitColocatedJoinCommand(EsqlBaseParser.ColocatedJoinCommandContext ctx);
+  /**
    * Enter a parse tree produced by {@link EsqlBaseParser#joinTarget}.
    * @param ctx the parse tree
    */

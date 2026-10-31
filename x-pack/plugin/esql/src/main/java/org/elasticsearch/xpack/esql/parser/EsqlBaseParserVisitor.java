@@ -950,6 +950,12 @@ public interface EsqlBaseParserVisitor<T> extends ParseTreeVisitor<T> {
    */
   T visitJoinCommand(EsqlBaseParser.JoinCommandContext ctx);
   /**
+   * Visit a parse tree produced by {@link EsqlBaseParser#colocatedJoinCommand}.
+   * @param ctx the parse tree
+   * @return the visitor result
+   */
+  T visitColocatedJoinCommand(EsqlBaseParser.ColocatedJoinCommandContext ctx);
+  /**
    * Visit a parse tree produced by {@link EsqlBaseParser#joinTarget}.
    * @param ctx the parse tree
    * @return the visitor result
