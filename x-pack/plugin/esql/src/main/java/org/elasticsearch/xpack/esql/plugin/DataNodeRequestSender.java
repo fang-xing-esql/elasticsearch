@@ -17,9 +17,11 @@ import org.elasticsearch.action.search.SearchShardsRequest;
 import org.elasticsearch.action.search.SearchShardsResponse;
 import org.elasticsearch.action.search.ShardSearchFailure;
 import org.elasticsearch.action.support.TransportActions;
+import org.elasticsearch.cluster.metadata.IndexMetadata;
 import org.elasticsearch.cluster.node.DiscoveryNode;
 import org.elasticsearch.cluster.node.DiscoveryNodeRole;
 import org.elasticsearch.cluster.project.ProjectResolver;
+import org.elasticsearch.cluster.routing.ShardRouting;
 import org.elasticsearch.cluster.routing.SplitShardCountSummary;
 import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.breaker.CircuitBreakingException;
@@ -27,7 +29,9 @@ import org.elasticsearch.common.util.Maps;
 import org.elasticsearch.common.util.concurrent.ConcurrentCollections;
 import org.elasticsearch.compute.operator.DriverCompletionInfo;
 import org.elasticsearch.compute.operator.FailureCollector;
+import org.elasticsearch.core.Nullable;
 import org.elasticsearch.index.Index;
+import org.elasticsearch.index.IndexNotFoundException;
 import org.elasticsearch.index.IndexSettings;
 import org.elasticsearch.index.SliceSelection;
 import org.elasticsearch.index.query.QueryBuilder;
@@ -62,6 +66,7 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.stream.Collectors;
 
 import static java.util.HashMap.newHashMap;
 import static org.elasticsearch.core.TimeValue.timeValueNanos;
@@ -164,8 +169,15 @@ abstract class DataNodeRequestSender {
                     selectFailures()
                 );
             }))) {
-                pendingShardIds.addAll(order(targetShards));
-                trySendingRequestsForPendingShards(targetShards, computeListener);
+                try {
+                    pendingShardIds.addAll(order(targetShards));
+                    trySendingRequestsForPendingShards(targetShards, computeListener);
+                } catch (Exception e) {
+                    // An exception escaping here would complete the listener twice (close() then wrap's onFailure) and trip an
+                    // assertion; fail the compute through the listener instead and keep the cause in the log.
+                    LOGGER.error("failed to dispatch data node requests", e);
+                    computeListener.acquireAvoid().onFailure(e);
+                }
             }
         }, listener::onFailure));
     }
@@ -527,6 +539,10 @@ abstract class DataNodeRequestSender {
                 for (String n : group.allocatedNodes()) {
                     allocatedNodes.add(nodes.get(n));
                 }
+                String partnerIndex = colocatedPartnerIndex();
+                if (partnerIndex != null) {
+                    allocatedNodes = restrictToPartnerNodes(allocatedNodes, shardId, partnerIndex);
+                }
                 AliasFilter aliasFilter = resp.getAliasFilters().get(shardId.getIndex().getUUID());
                 shards.put(shardId, new TargetShard(shardId, allocatedNodes, aliasFilter, group.splitShardCountSummary()));
             }
@@ -576,6 +592,43 @@ abstract class DataNodeRequestSender {
             }
         }
         return false;
+    }
+
+    /**
+     * For a co-located join: the concrete right index. Every left shard is then sent to a node that also holds the right
+     * shard with the same number. {@code null} when the plan has no co-located join.
+     */
+    @Nullable
+    protected String colocatedPartnerIndex() {
+        return null;
+    }
+
+    private List<DiscoveryNode> restrictToPartnerNodes(List<DiscoveryNode> nodes, ShardId shardId, String partnerIndex) {
+        var project = projectResolver.getProjectState(clusterService.state());
+        IndexMetadata partner = project.metadata().index(partnerIndex);
+        if (partner == null) {
+            throw new IndexNotFoundException(partnerIndex);
+        }
+        Set<String> partnerNodes = project.routingTable()
+            .shardRoutingTable(new ShardId(partner.getIndex(), shardId.id()))
+            .allShards()
+            .filter(shard -> shard.active() && shard.isSearchable())
+            .map(ShardRouting::currentNodeId)
+            .collect(Collectors.toSet());
+        // Mutable: the caller consumes the list as remainingNodes and removes entries from it.
+        List<DiscoveryNode> common = new ArrayList<>(nodes.stream().filter(node -> partnerNodes.contains(node.getId())).toList());
+        if (common.isEmpty()) {
+            throw new IllegalStateException(
+                "co-located join: shard ["
+                    + shardId.id()
+                    + "] of ["
+                    + shardId.getIndexName()
+                    + "] and ["
+                    + partnerIndex
+                    + "] have no common node"
+            );
+        }
+        return common;
     }
 
     /**

@@ -19,6 +19,7 @@ import org.elasticsearch.action.support.IndicesOptions;
 import org.elasticsearch.action.support.TransportActions;
 import org.elasticsearch.cluster.ClusterState;
 import org.elasticsearch.cluster.ClusterStateObserver;
+import org.elasticsearch.cluster.metadata.IndexMetadata;
 import org.elasticsearch.cluster.metadata.IndexNameExpressionResolver;
 import org.elasticsearch.cluster.node.DiscoveryNode;
 import org.elasticsearch.cluster.project.ProjectResolver;
@@ -65,9 +66,11 @@ import org.elasticsearch.core.RefCounted;
 import org.elasticsearch.core.Releasable;
 import org.elasticsearch.core.Releasables;
 import org.elasticsearch.core.TimeValue;
+import org.elasticsearch.index.IndexNotFoundException;
 import org.elasticsearch.index.mapper.BlockLoader;
 import org.elasticsearch.index.mapper.MappedFieldType;
 import org.elasticsearch.index.query.SearchExecutionContext;
+import org.elasticsearch.index.shard.IndexShard;
 import org.elasticsearch.index.shard.ShardId;
 import org.elasticsearch.indices.IndicesService;
 import org.elasticsearch.node.NodeClosedException;
@@ -423,6 +426,39 @@ public abstract class AbstractLookupService<R extends AbstractLookupService.Requ
         }
         T transportRequest = transportRequest(request, shardIt.shardId());
         sendChildRequest(parentTask, outListener, targetNode, transportRequest);
+    }
+
+    /**
+     * Looks up against one specific shard of a regular (possibly multi-shard) index, which must be hosted on this node.
+     * Used by the co-located join: the shard number is that of the left page's shard, so the partner shard holds every
+     * key the page can match. Bypasses the single-shard check of {@link #getShardIterator} and the node selection.
+     */
+    public final void lookupAsyncOnLocalShard(
+        R request,
+        int shardNumber,
+        CancellableTask parentTask,
+        ActionListener<LookupResponse> outListener
+    ) {
+        final ShardId shardId;
+        try {
+            var projectState = projectResolver.getProjectState(clusterService.state());
+            IndexMetadata indexMetadata = projectState.metadata().index(request.index);
+            if (indexMetadata == null) {
+                throw new IndexNotFoundException(request.index);
+            }
+            shardId = new ShardId(indexMetadata.getIndex(), shardNumber);
+            // Guard the co-location invariant for this batch: the partner shard must be active here.
+            IndexShard shard = indicesService.indexServiceSafe(shardId.getIndex()).getShard(shardNumber);
+            ShardRouting routing = shard.routingEntry();
+            if (routing == null || routing.active() == false) {
+                throw new UnavailableShardsException(shardId, "co-located join: partner shard is not active on this node");
+            }
+        } catch (Exception e) {
+            outListener.onFailure(e);
+            return;
+        }
+        T transportRequest = transportRequest(request, shardId);
+        sendChildRequest(parentTask, outListener, clusterService.localNode(), transportRequest);
     }
 
     protected void sendChildRequest(
