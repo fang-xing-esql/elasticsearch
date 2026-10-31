@@ -19,6 +19,7 @@ import org.elasticsearch.action.support.IndicesOptions;
 import org.elasticsearch.action.support.TransportActions;
 import org.elasticsearch.cluster.ClusterState;
 import org.elasticsearch.cluster.ClusterStateObserver;
+import org.elasticsearch.cluster.metadata.IndexMetadata;
 import org.elasticsearch.cluster.metadata.IndexNameExpressionResolver;
 import org.elasticsearch.cluster.node.DiscoveryNode;
 import org.elasticsearch.cluster.project.ProjectResolver;
@@ -65,6 +66,7 @@ import org.elasticsearch.core.RefCounted;
 import org.elasticsearch.core.Releasable;
 import org.elasticsearch.core.Releasables;
 import org.elasticsearch.core.TimeValue;
+import org.elasticsearch.index.IndexNotFoundException;
 import org.elasticsearch.index.mapper.BlockLoader;
 import org.elasticsearch.index.mapper.MappedFieldType;
 import org.elasticsearch.index.query.SearchExecutionContext;
@@ -103,6 +105,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -313,17 +316,35 @@ public abstract class AbstractLookupService<R extends AbstractLookupService.Requ
      * the copies are resolved once more from a newer cluster state.
      */
     public final void lookupAsync(R request, CancellableTask parentTask, ActionListener<LookupResponse> outListener) {
+        lookupOnShardCopies((state, l) -> getShardIterator(request.index, state, l), request, parentTask, outListener);
+    }
+
+    /**
+     * Resolves the copies of the shard to look up against from a cluster state, or fails the listener and returns {@code null}.
+     */
+    @FunctionalInterface
+    private interface ShardCopies {
+        @Nullable
+        ShardIterator resolve(ClusterState state, ActionListener<LookupResponse> listener);
+    }
+
+    private void lookupOnShardCopies(
+        ShardCopies copies,
+        R request,
+        CancellableTask parentTask,
+        ActionListener<LookupResponse> outListener
+    ) {
         ClusterState state = clusterService.state();
-        ShardIterator shardIt = getShardIterator(request.index, state, outListener);
+        ShardIterator shardIt = copies.resolve(state, outListener);
         if (shardIt == null) {
             return;
         }
         T transportRequest = transportRequest(request, shardIt.shardId());
-        lookupOnNextShardCopy(request.index, parentTask, state, shardIt, transportRequest, null, false, outListener);
+        lookupOnNextShardCopy(copies, parentTask, state, shardIt, transportRequest, null, false, outListener);
     }
 
     private void lookupOnNextShardCopy(
-        String index,
+        ShardCopies copies,
         CancellableTask parentTask,
         ClusterState state,
         ShardIterator shardIt,
@@ -339,7 +360,7 @@ public abstract class AbstractLookupService<R extends AbstractLookupService.Requ
             } else if (resolvedAgain) {
                 outListener.onFailure(lastFailure);
             } else {
-                lookupOnNewerShardCopies(index, parentTask, state, transportRequest, lastFailure, outListener);
+                lookupOnNewerShardCopies(copies, parentTask, state, transportRequest, lastFailure, outListener);
             }
             return;
         }
@@ -347,7 +368,7 @@ public abstract class AbstractLookupService<R extends AbstractLookupService.Requ
         // TODO: avoid forking for the local lookup
         sendChildRequest(parentTask, outListener.delegateResponse((l, e) -> {
             if (isShardCopyUnavailable(e) && parentTask.isCancelled() == false) {
-                lookupOnNextShardCopy(index, parentTask, state, shardIt, transportRequest, e, resolvedAgain, l);
+                lookupOnNextShardCopy(copies, parentTask, state, shardIt, transportRequest, e, resolvedAgain, l);
             } else {
                 l.onFailure(e);
             }
@@ -355,7 +376,7 @@ public abstract class AbstractLookupService<R extends AbstractLookupService.Requ
     }
 
     private void lookupOnNewerShardCopies(
-        String index,
+        ShardCopies copies,
         CancellableTask parentTask,
         ClusterState routedState,
         T transportRequest,
@@ -368,9 +389,9 @@ public abstract class AbstractLookupService<R extends AbstractLookupService.Requ
             public void onNewClusterState(ClusterState state) {
                 // Exceptions thrown from here never reach the listener, so pass failures such as a deleted index to it explicitly.
                 ActionListener.run(outListener, l -> {
-                    ShardIterator shardIt = getShardIterator(index, state, l);
+                    ShardIterator shardIt = copies.resolve(state, l);
                     if (shardIt != null) {
-                        lookupOnNextShardCopy(index, parentTask, state, shardIt, transportRequest, lastFailure, true, l);
+                        lookupOnNextShardCopy(copies, parentTask, state, shardIt, transportRequest, lastFailure, true, l);
                     }
                 });
             }
@@ -423,6 +444,49 @@ public abstract class AbstractLookupService<R extends AbstractLookupService.Requ
         }
         T transportRequest = transportRequest(request, shardIt.shardId());
         sendChildRequest(parentTask, outListener, targetNode, transportRequest);
+    }
+
+    /**
+     * Looks up against one specific shard of a regular (possibly multi-shard) index. Used by the co-located join: the right
+     * index is routed by the join key, so the shard that holds the matches of a batch follows from the keys. A copy on this
+     * node is preferred, so a batch whose partner shard is local never leaves the node; otherwise the lookup goes to another
+     * copy and, like {@link #lookupAsync}, moves on to the next copy when one turns out to be gone. Bypasses the single-shard
+     * check of {@link #getShardIterator}.
+     */
+    public final void lookupAsyncOnShard(
+        R request,
+        int shardNumber,
+        CancellableTask parentTask,
+        ActionListener<LookupResponse> outListener
+    ) {
+        lookupOnShardCopies((state, l) -> shardCopies(request.index, shardNumber, state, l), request, parentTask, outListener);
+    }
+
+    /**
+     * The active, searchable copies of one shard of {@code index}, the copy on this node first.
+     */
+    @Nullable
+    private ShardIterator shardCopies(String index, int shardNumber, ClusterState state, ActionListener<LookupResponse> listener) {
+        var projectState = projectResolver.getProjectState(state);
+        IndexMetadata indexMetadata = projectState.metadata().index(index);
+        if (indexMetadata == null) {
+            listener.onFailure(new IndexNotFoundException(index));
+            return null;
+        }
+        if (shardNumber < 0 || shardNumber >= indexMetadata.getNumberOfShards()) {
+            listener.onFailure(new EsqlIllegalArgumentException("target index {} has no shard [{}]", index, shardNumber));
+            return null;
+        }
+        ShardId shardId = new ShardId(indexMetadata.getIndex(), shardNumber);
+        String localNodeId = state.nodes().getLocalNodeId();
+        List<ShardRouting> copies = new ArrayList<>();
+        projectState.routingTable()
+            .shardRoutingTable(shardId)
+            .allShards()
+            .filter(shard -> shard.active() && shard.isSearchable())
+            .forEach(copies::add);
+        copies.sort(Comparator.comparing(shard -> localNodeId.equals(shard.currentNodeId()) == false));
+        return new ShardIterator(shardId, copies);
     }
 
     protected void sendChildRequest(

@@ -1,0 +1,467 @@
+set -x
+
+# Co-located join: `events` (many rows per session) and `sessions`
+# (one row per session) are both routed by session_id, and both are cloned from
+# an empty seed index so shard i of each index lands on the same node.
+# `events_unrouted` holds the same events in an index that is not routed by
+# session_id (2 shards, routed by _id, placed anywhere): only the right side of
+# a JOIN has to be routed by the join key, so it joins `sessions` too, looking
+# up each event on the sessions shard that holds its session, locally or on
+# another node.
+# Run against `./gradlew run --nodes=3`.
+
+main() {
+#cleanup
+#seed
+#create_events
+#create_sessions
+#unblock
+#create_events_unrouted
+#shards
+#routing
+#colocation
+#unrouted_layout
+join
+join_where
+join_stats
+join_unrouted
+join_unrouted_where
+join_unrouted_stats
+join_mixed
+#join_unrouted_profile
+#join_profile
+#join_reference
+#join_rejected
+#routing_enforced
+}
+
+# -----------------------------------------------------------------------------
+# cleanup
+# -----------------------------------------------------------------------------
+cleanup() {
+curl -u elastic:password -X DELETE "localhost:9200/events/"
+curl -u elastic:password -X DELETE "localhost:9200/events_unrouted/"
+curl -u elastic:password -X DELETE "localhost:9200/sessions/"
+curl -u elastic:password -X DELETE "localhost:9200/colocate_seed/"
+}
+
+# -----------------------------------------------------------------------------
+# seed: an empty, write-blocked index that carries the shared layout.
+# 3 primaries, no replicas, one shard per node (3-node cluster), routing
+# required, and index.routing_field: session_id, so the server derives
+# _routing from session_id and rejects any write where the two disagree
+# (including updates that change session_id). Documents need no ?routing.
+# Clones inherit the setting, which is what the JOIN planner checks.
+# Both real indices are cloned from it; ResizeAllocationDecider forces clone
+# shard i onto the node holding seed shard i, which gives the alignment.
+# number_of_replicas is not copied by clone, so each clone sets it explicitly.
+# -----------------------------------------------------------------------------
+seed() {
+curl -u elastic:password -X PUT "localhost:9200/colocate_seed?pretty" -H 'Content-Type: application/json' -d'
+{
+  "settings": {
+    "number_of_shards": 3,
+    "number_of_replicas": 0,
+    "index.routing.allocation.total_shards_per_node": 1,
+    "index.routing.rebalance.enable": "none",
+    "index.routing_field": "session_id",
+    "index.blocks.write": true
+  },
+  "mappings": {
+    "dynamic": "strict",
+    "_routing": { "required": true },
+    "properties": {
+      "session_id": { "type": "keyword" }
+    }
+  }
+}
+'
+curl -u elastic:password -X GET "localhost:9200/_cluster/health/colocate_seed?wait_for_status=green&timeout=30s&pretty"
+}
+
+# -----------------------------------------------------------------------------
+# events: many rows per session
+# -----------------------------------------------------------------------------
+create_events() {
+curl -u elastic:password -X POST "localhost:9200/colocate_seed/_clone/events?wait_for_active_shards=1&pretty" -H 'Content-Type: application/json' -d'
+{ "settings": { "index.number_of_replicas": 0 } }
+'
+curl -u elastic:password -X GET "localhost:9200/_cluster/health/events?wait_for_status=green&timeout=30s&pretty"
+curl -u elastic:password -X PUT "localhost:9200/events/_mapping?pretty" -H 'Content-Type: application/json' -d'
+{
+  "properties": {
+    "@timestamp":  { "type": "date" },
+    "seq":         { "type": "long" },
+    "event_type":  { "type": "keyword" },
+    "page":        { "type": "keyword" },
+    "duration_ms": { "type": "long" }
+  }
+}
+'
+}
+
+# -----------------------------------------------------------------------------
+# sessions: one row per session (the dimension side of the join).
+# s-500 has events but no session row; s-700 has a session row but no events.
+# -----------------------------------------------------------------------------
+create_sessions() {
+curl -u elastic:password -X POST "localhost:9200/colocate_seed/_clone/sessions?wait_for_active_shards=1&pretty" -H 'Content-Type: application/json' -d'
+{ "settings": { "index.number_of_replicas": 0 } }
+'
+curl -u elastic:password -X GET "localhost:9200/_cluster/health/sessions?wait_for_status=green&timeout=30s&pretty"
+curl -u elastic:password -X PUT "localhost:9200/sessions/_mapping?pretty" -H 'Content-Type: application/json' -d'
+{
+  "properties": {
+    "started_at": { "type": "date" },
+    "user_id":    { "type": "keyword" },
+    "device":     { "type": "keyword" },
+    "country":    { "type": "keyword" },
+    "referrer":   { "type": "keyword" },
+    "plan":       { "type": "keyword" }
+  }
+}
+'
+}
+
+# -----------------------------------------------------------------------------
+# clones inherit the write block from the seed; lift it, then load data
+# -----------------------------------------------------------------------------
+unblock() {
+curl -u elastic:password -X PUT "localhost:9200/events,sessions/_settings?pretty" -H 'Content-Type: application/json' -d'
+{ "index.blocks.write": null }
+'
+load_events
+load_sessions
+}
+
+# load_events [index]: the events, into `events` by default
+load_events() {
+local index=${1:-events}
+curl -u elastic:password -X PUT "localhost:9200/$index/_bulk?refresh&pretty" -H 'Content-Type: application/json' -d'
+{"index": {"_id": "1"}}
+{"session_id": "s-100", "@timestamp": "2026-10-30T10:00:00Z", "seq": 1, "event_type": "view",     "page": "/home",     "duration_ms": 120}
+{"index": {"_id": "2"}}
+{"session_id": "s-100", "@timestamp": "2026-10-30T10:00:05Z", "seq": 2, "event_type": "click",    "page": "/pricing",  "duration_ms": 30}
+{"index": {"_id": "3"}}
+{"session_id": "s-100", "@timestamp": "2026-10-30T10:01:00Z", "seq": 3, "event_type": "purchase", "page": "/checkout", "duration_ms": 900}
+{"index": {"_id": "4"}}
+{"session_id": "s-200", "@timestamp": "2026-10-30T11:00:00Z", "seq": 1, "event_type": "view",     "page": "/home",     "duration_ms": 80}
+{"index": {"_id": "5"}}
+{"session_id": "s-200", "@timestamp": "2026-10-30T11:00:09Z", "seq": 2, "event_type": "click",    "page": "/docs",     "duration_ms": 45}
+{"index": {"_id": "6"}}
+{"session_id": "s-300", "@timestamp": "2026-10-30T12:00:00Z", "seq": 1, "event_type": "view",     "page": "/home",     "duration_ms": 60}
+{"index": {"_id": "7"}}
+{"session_id": "s-300", "@timestamp": "2026-10-30T12:00:20Z", "seq": 2, "event_type": "purchase", "page": "/checkout", "duration_ms": 700}
+{"index": {"_id": "8"}}
+{"session_id": "s-400", "@timestamp": "2026-10-30T13:00:00Z", "seq": 1, "event_type": "view",     "page": "/home",     "duration_ms": 50}
+{"index": {"_id": "9"}}
+{"session_id": "s-400", "@timestamp": "2026-10-30T13:00:30Z", "seq": 2, "event_type": "search",   "page": "/search",   "duration_ms": 210}
+{"index": {"_id": "10"}}
+{"session_id": "s-400", "@timestamp": "2026-10-30T13:01:00Z", "seq": 3, "event_type": "click",    "page": "/docs",     "duration_ms": 40}
+{"index": {"_id": "11"}}
+{"session_id": "s-500", "@timestamp": "2026-10-30T14:00:00Z", "seq": 1, "event_type": "view",     "page": "/home",     "duration_ms": 95}
+{"index": {"_id": "12"}}
+{"session_id": "s-600", "@timestamp": "2026-10-30T15:00:00Z", "seq": 1, "event_type": "view",     "page": "/pricing",  "duration_ms": 70}
+{"index": {"_id": "13"}}
+{"session_id": "s-600", "@timestamp": "2026-10-30T15:00:12Z", "seq": 2, "event_type": "click",    "page": "/checkout", "duration_ms": 35}
+{"index": {"_id": "14"}}
+{"session_id": "s-600", "@timestamp": "2026-10-30T15:00:50Z", "seq": 3, "event_type": "purchase", "page": "/checkout", "duration_ms": 1200}
+'
+}
+
+load_sessions() {
+curl -u elastic:password -X PUT "localhost:9200/sessions/_bulk?refresh&pretty" -H 'Content-Type: application/json' -d'
+{"index": {"_id": "s-100"}}
+{"session_id": "s-100", "started_at": "2026-10-30T10:00:00Z", "user_id": "u-1", "device": "desktop", "country": "DE", "referrer": "google",  "plan": "pro"}
+{"index": {"_id": "s-200"}}
+{"session_id": "s-200", "started_at": "2026-10-30T11:00:00Z", "user_id": "u-2", "device": "mobile",  "country": "US", "referrer": "direct",  "plan": "free"}
+{"index": {"_id": "s-300"}}
+{"session_id": "s-300", "started_at": "2026-10-30T12:00:00Z", "user_id": "u-3", "device": "mobile",  "country": "DE", "referrer": "twitter", "plan": "free"}
+{"index": {"_id": "s-400"}}
+{"session_id": "s-400", "started_at": "2026-10-30T13:00:00Z", "user_id": "u-1", "device": "desktop", "country": "DE", "referrer": "google",  "plan": "pro"}
+{"index": {"_id": "s-600"}}
+{"session_id": "s-600", "started_at": "2026-10-30T15:00:00Z", "user_id": "u-2", "device": "tablet",  "country": "FR", "referrer": "direct",  "plan": "pro"}
+{"index": {"_id": "s-700"}}
+{"session_id": "s-700", "started_at": "2026-10-30T16:00:00Z", "user_id": "u-5", "device": "desktop", "country": "US", "referrer": "google",  "plan": "free"}
+'
+}
+
+# -----------------------------------------------------------------------------
+# events_unrouted: the same events in a plain index. 2 shards (sessions has 3),
+# no index.routing_field and no required _routing, so documents are routed by
+# _id and a session's events are spread over both shards. No seed, no clone:
+# the shards go wherever the allocator puts them.
+# -----------------------------------------------------------------------------
+create_events_unrouted() {
+curl -u elastic:password -X PUT "localhost:9200/events_unrouted?pretty" -H 'Content-Type: application/json' -d'
+{
+  "settings": {
+    "number_of_shards": 2,
+    "number_of_replicas": 0
+  },
+  "mappings": {
+    "dynamic": "strict",
+    "properties": {
+      "session_id":  { "type": "keyword" },
+      "@timestamp":  { "type": "date" },
+      "seq":         { "type": "long" },
+      "event_type":  { "type": "keyword" },
+      "page":        { "type": "keyword" },
+      "duration_ms": { "type": "long" }
+    }
+  }
+}
+'
+curl -u elastic:password -X GET "localhost:9200/_cluster/health/events_unrouted?wait_for_status=green&timeout=30s&pretty"
+load_events events_unrouted
+}
+
+# -----------------------------------------------------------------------------
+# which node holds each shard copy: the node column must match per shard number
+# for events and sessions; events_unrouted can be anywhere
+# -----------------------------------------------------------------------------
+shards() {
+curl -u elastic:password -X GET "localhost:9200/_cat/nodes?v&h=name,http,node.role,master"
+curl -u elastic:password -X GET "localhost:9200/_cat/shards/events,sessions,events_unrouted?v&s=shard,index&h=index,shard,prirep,state,docs,node"
+}
+
+# events_unrouted spreads a session over both shards (unlike events)
+unrouted_layout() {
+for shard in 0 1; do
+curl -u elastic:password -X POST "localhost:9200/events_unrouted/_search?preference=_shards:$shard&pretty&filter_path=aggregations" -H 'Content-Type: application/json' -d'
+{ "size": 0, "aggs": { "sessions": { "terms": { "field": "session_id", "size": 1000 } } } }
+'
+done
+}
+
+# -----------------------------------------------------------------------------
+# which shard a session_id maps to: same shard number and node in both indices
+# -----------------------------------------------------------------------------
+routing() {
+curl -u elastic:password -X GET "localhost:9200/events/_search_shards?routing=s-100&pretty&filter_path=shards.shard,shards.index,shards.node"
+curl -u elastic:password -X GET "localhost:9200/sessions/_search_shards?routing=s-100&pretty&filter_path=shards.shard,shards.index,shards.node"
+curl -u elastic:password -X GET "localhost:9200/events/_search_shards?routing=s-300&pretty&filter_path=shards.shard,shards.index,shards.node"
+curl -u elastic:password -X GET "localhost:9200/sessions/_search_shards?routing=s-300&pretty&filter_path=shards.shard,shards.index,shards.node"
+}
+
+# -----------------------------------------------------------------------------
+# co-location invariant: for each shard number, the session_id set in events
+# and the one in sessions must be subsets of the same partition, and a session
+# must not appear in two shard numbers.
+# -----------------------------------------------------------------------------
+colocation() {
+curl -u elastic:password -X POST "localhost:9200/_query?format=txt&pretty" -H 'Content-Type: application/json' -d'
+{
+  "query": "FROM events, sessions METADATA _index | SORT session_id, _index | KEEP session_id, _index"
+}
+'
+
+for shard in 0 1 2; do
+curl -u elastic:password -X POST "localhost:9200/events,sessions/_search?preference=_shards:$shard&pretty&filter_path=aggregations" -H 'Content-Type: application/json' -d'
+{
+  "size": 0,
+  "aggs": {
+    "by_index": {
+      "terms": { "field": "_index" },
+      "aggs": { "sessions": { "terms": { "field": "session_id", "size": 1000 } } }
+    }
+  }
+}
+'
+done
+}
+
+# -----------------------------------------------------------------------------
+# co-located join: `FROM events | JOIN sessions ON session_id` (snapshot only).
+# Each data node joins its local events shard against the sessions shard with the
+# same number; only results (or partial aggregates) go back to the coordinator.
+# -----------------------------------------------------------------------------
+join() {
+curl -u elastic:password -X POST "localhost:9200/_query?format=txt&pretty" -H 'Content-Type: application/json' -d'
+{
+  "query": "FROM events | JOIN sessions ON session_id | KEEP session_id, seq, event_type, country, plan | SORT session_id, seq"
+}
+'
+}
+
+# filters after the join: the right-side conjunct is pushed into the lookup query, the left one into the events scan
+join_where() {
+curl -u elastic:password -X POST "localhost:9200/_query?format=txt&pretty" -H 'Content-Type: application/json' -d'
+{
+  "query": "FROM events | JOIN sessions ON session_id | WHERE country == \"DE\" AND seq > 1 | KEEP session_id, seq, event_type, country, plan | SORT session_id, seq"
+}
+'
+curl -u elastic:password -X POST "localhost:9200/_query?format=txt&pretty" -H 'Content-Type: application/json' -d'
+{
+  "query": "FROM events | WHERE event_type == \"purchase\" | JOIN sessions ON session_id | KEEP session_id, seq, country, plan | SORT session_id"
+}
+'
+}
+
+# aggregation after the join: partial aggregates per data node, final on the coordinator
+join_stats() {
+curl -u elastic:password -X POST "localhost:9200/_query?format=txt&pretty" -H 'Content-Type: application/json' -d'
+{
+  "query": "FROM events | JOIN sessions ON session_id | STATS n = COUNT(*), spent = SUM(duration_ms) BY country, plan | SORT country, plan"
+}
+'
+
+curl -u elastic:password -X POST "localhost:9200/_query?format=txt&pretty" -H 'Content-Type: application/json' -d'
+{
+  "query": "FROM events | JOIN sessions ON session_id | STATS n = COUNT(*), spent = SUM(duration_ms) BY session_id | SORT session_id"
+}
+'
+}
+
+# -----------------------------------------------------------------------------
+# JOIN from the unrouted events: only sessions is routed by session_id. Each
+# events_unrouted page is split by the sessions shard that holds each row's
+# session; the parts are looked up on this node when it holds that sessions
+# shard, on another node otherwise. Same answers as the joins from `events`.
+# -----------------------------------------------------------------------------
+join_unrouted() {
+curl -u elastic:password -X POST "localhost:9200/_query?format=txt&pretty" -H 'Content-Type: application/json' -d'
+{
+  "query": "FROM events_unrouted | JOIN sessions ON session_id | KEEP session_id, seq, event_type, country, plan | SORT session_id, seq"
+}
+'
+}
+
+join_unrouted_where() {
+curl -u elastic:password -X POST "localhost:9200/_query?format=txt&pretty" -H 'Content-Type: application/json' -d'
+{
+  "query": "FROM events_unrouted | JOIN sessions ON session_id | WHERE country == \"DE\" AND seq > 1 | KEEP session_id, seq, event_type, country, plan | SORT session_id, seq"
+}
+'
+curl -u elastic:password -X POST "localhost:9200/_query?format=txt&pretty" -H 'Content-Type: application/json' -d'
+{
+  "query": "FROM events_unrouted | WHERE event_type == \"purchase\" | JOIN sessions ON session_id | KEEP session_id, seq, country, plan | SORT session_id"
+}
+'
+}
+
+join_unrouted_stats() {
+curl -u elastic:password -X POST "localhost:9200/_query?format=txt&pretty" -H 'Content-Type: application/json' -d'
+{
+  "query": "FROM events_unrouted | JOIN sessions ON session_id | STATS n = COUNT(*), spent = SUM(duration_ms) BY country, plan | SORT country, plan"
+}
+'
+curl -u elastic:password -X POST "localhost:9200/_query?format=txt&pretty" -H 'Content-Type: application/json' -d'
+{
+  "query": "FROM events_unrouted | JOIN sessions ON session_id | STATS n = COUNT(*), spent = SUM(duration_ms) BY session_id | SORT session_id"
+}
+'
+}
+
+# both events indices at once: pages of `events` go to their partner shard as a
+# whole, pages of `events_unrouted` are split by key; every count is doubled
+join_mixed() {
+curl -u elastic:password -X POST "localhost:9200/_query?format=txt&pretty" -H 'Content-Type: application/json' -d'
+{
+  "query": "FROM events, events_unrouted | JOIN sessions ON session_id | STATS n = COUNT(*) BY plan | SORT plan"
+}
+'
+}
+
+# where it ran: one data driver per events_unrouted shard, each with
+# LookupOperator[index=sessions ... colocated=true join=inner]
+join_unrouted_profile() {
+curl -u elastic:password -X POST "localhost:9200/_query?format=json&filter_path=profile.drivers.node_name,profile.drivers.description,profile.drivers.operators.operator&pretty" -H 'Content-Type: application/json' -d'
+{
+  "query": "FROM events_unrouted | JOIN sessions ON session_id | STATS n = COUNT(*) BY country",
+  "profile": true
+}
+'
+}
+
+# where it ran: one data driver per node, each with LookupOperator[index=sessions ... colocated=true]
+join_profile() {
+curl -u elastic:password -X POST "localhost:9200/_query?format=json&filter_path=profile.drivers.node_name,profile.drivers.description,profile.drivers.operators.operator&pretty" -H 'Content-Type: application/json' -d'
+{
+  "query": "FROM events | JOIN sessions ON session_id | STATS n = COUNT(*) BY country",
+  "profile": true
+}
+'
+}
+
+# same answers through IN subqueries (coordinator-side semi / anti join), for cross-checking
+join_reference() {
+curl -u elastic:password -X POST "localhost:9200/_query?format=txt&pretty" -H 'Content-Type: application/json' -d'
+{
+  "query": "FROM events | WHERE session_id IN (FROM sessions | WHERE country == \"DE\" | KEEP session_id) | STATS events = COUNT(*), purchases = COUNT(event_type == \"purchase\" OR NULL) BY session_id | SORT session_id"
+}
+'
+curl -u elastic:password -X POST "localhost:9200/_query?format=txt&pretty" -H 'Content-Type: application/json' -d'
+{
+  "query": "FROM sessions | WHERE session_id NOT IN (FROM events | WHERE event_type == \"purchase\" | KEEP session_id) | KEEP session_id, user_id, plan | SORT session_id"
+}
+'
+}
+
+# -----------------------------------------------------------------------------
+# rejected queries: a right index without index.routing_field (sessions_one),
+# a right index that is not routed by the key (events_unrouted), a key that is
+# not the routing field, unknown key, wildcard, two keys.
+# The left side needs no routing, so `FROM events_unrouted | JOIN sessions`
+# is not rejected (see join_unrouted).
+# -----------------------------------------------------------------------------
+join_rejected() {
+curl -u elastic:password -X PUT "localhost:9200/sessions_one" -H 'Content-Type: application/json' -d'
+{
+  "settings": { "number_of_shards": 1, "number_of_replicas": 0 },
+  "mappings": { "properties": { "session_id": { "type": "keyword" }, "plan": { "type": "keyword" } } }
+}
+'
+curl -u elastic:password -X POST "localhost:9200/_query?format=txt&pretty" -H 'Content-Type: application/json' -d'
+{
+  "query": "FROM events | JOIN sessions_one ON session_id"
+}
+'
+curl -u elastic:password -X DELETE "localhost:9200/sessions_one"
+curl -u elastic:password -X POST "localhost:9200/_query?format=txt&pretty" -H 'Content-Type: application/json' -d'
+{
+  "query": "FROM sessions | JOIN events_unrouted ON session_id"
+}
+'
+curl -u elastic:password -X POST "localhost:9200/_query?format=txt&pretty" -H 'Content-Type: application/json' -d'
+{
+  "query": "FROM sessions | JOIN sessions ON user_id"
+}
+'
+curl -u elastic:password -X POST "localhost:9200/_query?format=txt&pretty" -H 'Content-Type: application/json' -d'
+{
+  "query": "FROM events | JOIN sessions ON device"
+}
+'
+curl -u elastic:password -X POST "localhost:9200/_query?format=txt&pretty" -H 'Content-Type: application/json' -d'
+{
+  "query": "FROM events | JOIN sess* ON session_id"
+}
+'
+curl -u elastic:password -X POST "localhost:9200/_query?format=txt&pretty" -H 'Content-Type: application/json' -d'
+{
+  "query": "FROM events | JOIN sessions ON session_id, seq"
+}
+'
+}
+
+# -----------------------------------------------------------------------------
+# index.routing_field at work: _routing is filled from session_id, a different
+# ?routing is rejected, and an update cannot move a document to another session.
+# -----------------------------------------------------------------------------
+routing_enforced() {
+curl -u elastic:password -X PUT "localhost:9200/sessions/_doc/s-800?refresh=true&pretty" -H 'Content-Type: application/json' -d'
+{ "session_id": "s-800", "user_id": "u-8", "plan": "free" }
+'
+curl -u elastic:password -X GET "localhost:9200/sessions/_doc/s-800?routing=s-800&pretty&filter_path=_routing,found"
+
+curl -u elastic:password -X PUT "localhost:9200/sessions/_doc/s-801?routing=s-999&pretty" -H 'Content-Type: application/json' -d'
+{ "session_id": "s-801", "user_id": "u-8", "plan": "free" }
+'
+curl -u elastic:password -X POST "localhost:9200/sessions/_update/s-800?routing=s-800&pretty" -H 'Content-Type: application/json' -d'
+{ "doc": { "session_id": "s-900" } }
+'
+curl -u elastic:password -X DELETE "localhost:9200/sessions/_doc/s-800?routing=s-800&refresh=true&pretty"
+}
+
+main "@"
