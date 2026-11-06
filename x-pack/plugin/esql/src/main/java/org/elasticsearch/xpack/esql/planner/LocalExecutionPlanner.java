@@ -1930,6 +1930,10 @@ public class LocalExecutionPlanner {
         List<MatchConfig> matchFields = List.of(new MatchConfig(right.exactAttribute().fieldName().string(), input));
 
         PartnerShards partnerShards = partnerShards(join, indexName, left, input.channel(), source.layout);
+        // Stream unless the query turns it off or a node holding a right shard can't stream.
+        boolean streaming = context.queryPragmas().colocatedJoinStreaming()
+            && configuration != null
+            && allCopiesSupportStreaming(lookupFromIndexService, indexName);
 
         return source.with(
             new LookupFromIndexOperator.Factory(
@@ -1944,7 +1948,7 @@ public class LocalExecutionPlanner {
                 join.source(),
                 join.right(),
                 null,
-                false,
+                streaming,
                 context.queryPragmas().exchangeBufferSize(),
                 configuration.profile(),
                 configuration,
@@ -2016,7 +2020,18 @@ public class LocalExecutionPlanner {
             if (service.getClusterService().getClusterSettings().get(EsqlPlugin.LOOKUP_JOIN_STREAMING) == false) {
                 return false;
             }
+        } catch (Exception e) {
+            logger.debug("Failed to read the lookup join streaming setting, using non-streaming operator", e);
+            return false;
+        }
+        return allCopiesSupportStreaming(service, indexName);
+    }
 
+    /**
+     * Whether every node holding a copy of a shard of {@code indexName} supports the streaming lookup protocol.
+     */
+    private static boolean allCopiesSupportStreaming(LookupFromIndexService service, String indexName) {
+        try {
             ClusterState clusterState = service.getClusterService().state();
 
             // Resolve target nodes for the lookup index

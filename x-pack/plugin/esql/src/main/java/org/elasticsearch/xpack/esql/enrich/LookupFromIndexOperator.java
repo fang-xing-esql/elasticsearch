@@ -83,10 +83,7 @@ public final class LookupFromIndexOperator extends AsyncOperator<LookupFromIndex
             if (useStreamingOperator && configuration == null) {
                 throw new IllegalArgumentException("configuration is required for streaming lookup operator");
             }
-            if (useStreamingOperator && partnerShards != null) {
-                throw new IllegalArgumentException("co-located lookup does not support the streaming operator");
-            }
-            if (useStreamingOperator && innerJoin) {
+            if (useStreamingOperator && innerJoin && partnerShards == null) {
                 throw new IllegalArgumentException("the streaming lookup operator does not support inner joins");
             }
         }
@@ -159,6 +156,37 @@ public final class LookupFromIndexOperator extends AsyncOperator<LookupFromIndex
 
         @Override
         public Operator get(DriverContext driverContext) {
+            if (useStreamingOperator && partnerShards != null) {
+                LookupFromIndexService service = lookupService.apply(driverContext);
+                return new ColocatedStreamingLookupOperator(
+                    partnerShards,
+                    maxOutstandingRequests,
+                    shard -> new StreamingLookupFromIndexOperator(
+                        driverContext,
+                        matchFields,
+                        sessionId,
+                        parentTask,
+                        maxOutstandingRequests,
+                        service,
+                        lookupIndexPattern,
+                        lookupIndex,
+                        loadFields,
+                        source,
+                        rightPreJoinPlan,
+                        joinOnConditions,
+                        exchangeBufferSize,
+                        profile,
+                        configuration,
+                        shard,
+                        innerJoin,
+                        // one lookup session per right shard and driver: the shards already spread the batches
+                        1
+                    ),
+                    lookupIndex,
+                    loadFields,
+                    innerJoin
+                );
+            }
             if (useStreamingOperator) {
                 return new StreamingLookupFromIndexOperator(
                     driverContext,

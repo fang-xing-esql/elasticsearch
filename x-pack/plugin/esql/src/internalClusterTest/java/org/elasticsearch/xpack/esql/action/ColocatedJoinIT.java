@@ -21,6 +21,7 @@ import org.elasticsearch.test.ESIntegTestCase;
 import org.elasticsearch.xcontent.XContentType;
 import org.elasticsearch.xpack.esql.VerificationException;
 import org.elasticsearch.xpack.esql.parser.ParsingException;
+import org.elasticsearch.xpack.esql.plugin.QueryPragmas;
 import org.junit.Before;
 
 import java.util.List;
@@ -34,7 +35,10 @@ import static org.elasticsearch.test.hamcrest.ElasticsearchAssertions.assertResp
 import static org.elasticsearch.xpack.esql.action.EsqlQueryRequest.syncEsqlQueryRequest;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.empty;
+import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.everyItem;
 import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.matchesRegex;
 import static org.hamcrest.Matchers.not;
 
 /**
@@ -238,6 +242,38 @@ public class ColocatedJoinIT extends AbstractEsqlIntegTestCase {
     }
 
     /**
+     * Runs every query with both the streaming and the per-page lookup.
+     */
+    @Override
+    protected QueryPragmas getPragmas() {
+        return new QueryPragmas(
+            Settings.builder().put(randomPragmas().settings()).put(QueryPragmas.COLOCATED_JOIN_STREAMING.getKey(), randomBoolean()).build()
+        );
+    }
+
+    private static EsqlQueryRequest profiled(String query, boolean streaming) {
+        EsqlQueryRequest request = syncEsqlQueryRequest(query);
+        request.pragmas(new QueryPragmas(Settings.builder().put(QueryPragmas.COLOCATED_JOIN_STREAMING.getKey(), streaming).build()));
+        request.profile(true);
+        return request;
+    }
+
+    private static List<DriverProfile> dataDrivers(EsqlQueryResponse resp) {
+        return resp.profile().drivers().stream().filter(d -> d.description().equals("data")).toList();
+    }
+
+    private static List<String> operators(DriverProfile driver) {
+        return driver.operators().stream().map(OperatorStatus::operator).toList();
+    }
+
+    private static String lookupOperator(List<String> operators, boolean streaming) {
+        String name = streaming ? "StreamingLookupOperator[" : "LookupOperator[";
+        String lookup = operators.stream().filter(o -> o.startsWith(name)).findFirst().orElse(null);
+        assertNotNull("no " + name + "] in " + operators, lookup);
+        return lookup;
+    }
+
+    /**
      * The rows of {@link #JOIN_QUERY} over the test data, for any left index holding the events.
      */
     private static final List<Iterable<Object>> JOINED = List.of(
@@ -369,21 +405,61 @@ public class ColocatedJoinIT extends AbstractEsqlIntegTestCase {
      * filter follows it.
      */
     public void testRunsOnEachDataNode() {
-        EsqlQueryRequest request = syncEsqlQueryRequest("FROM events | JOIN sessions ON session_id | STATS n = COUNT(*) BY country");
-        request.profile(true);
-        try (var resp = run(request)) {
-            List<DriverProfile> dataDrivers = resp.profile().drivers().stream().filter(d -> d.description().equals("data")).toList();
-            Set<String> nodes = dataDrivers.stream().map(DriverProfile::nodeName).collect(Collectors.toSet());
-            assertThat("one data driver per node, one shard pair each", nodes, hasSize(SHARDS));
-            for (DriverProfile driver : dataDrivers) {
-                List<String> operators = driver.operators().stream().map(OperatorStatus::operator).toList();
-                String lookup = operators.stream().filter(o -> o.startsWith("LookupOperator")).findFirst().orElse(null);
-                assertNotNull("no lookup operator in " + operators, lookup);
-                assertThat(lookup, containsString("index=sessions"));
-                assertThat(lookup, containsString("colocated=true"));
-                assertThat(lookup, containsString("join=inner"));
-                assertThat(operators.stream().filter(o -> o.startsWith("FilterOperator")).toList(), empty());
-                assertThat(operators.get(operators.size() - 1), containsString("ExchangeSinkOperator"));
+        for (boolean streaming : new boolean[] { false, true }) {
+            EsqlQueryRequest request = profiled("FROM events | JOIN sessions ON session_id | STATS n = COUNT(*) BY country", streaming);
+            try (var resp = run(request)) {
+                List<DriverProfile> dataDrivers = dataDrivers(resp);
+                Set<String> nodes = dataDrivers.stream().map(DriverProfile::nodeName).collect(Collectors.toSet());
+                assertThat("one data driver per node, one shard pair each", nodes, hasSize(SHARDS));
+                for (DriverProfile driver : dataDrivers) {
+                    List<String> operators = operators(driver);
+                    String lookup = lookupOperator(operators, streaming);
+                    assertThat(lookup, containsString("index=sessions"));
+                    assertThat(lookup, containsString("colocated=true"));
+                    assertThat(lookup, containsString("join=inner"));
+                    // only the right column the query uses is loaded
+                    assertThat(lookup, matchesRegex("(?s).* load_fields=\\[country\\{f}#\\d+] .*"));
+                    if (streaming) {
+                        // an aligned left shard only needs its partner shard
+                        assertThat(lookup, matchesRegex("(?s).* shards=\\[\\d] *]"));
+                    }
+                    assertThat(operators.stream().filter(o -> o.startsWith("FilterOperator")).toList(), empty());
+                    assertThat(operators.get(operators.size() - 1), containsString("ExchangeSinkOperator"));
+                }
+            }
+        }
+    }
+
+    /**
+     * With a {@code SORT} the left fields are read after the node-level top-n, for the surviving rows only, as for a single index.
+     * The right index must not get the left's {@code _doc} column, or every left field is read before the sort.
+     */
+    public void testSortReadsLeftFieldsAfterTopN() {
+        for (boolean streaming : new boolean[] { false, true }) {
+            EsqlQueryRequest request = profiled("FROM events | JOIN sessions ON session_id | SORT plan | LIMIT 3", streaming);
+            try (var resp = run(request)) {
+                assertColumnNames(
+                    resp.columns(),
+                    List.of(
+                        "@timestamp",
+                        "duration_ms",
+                        "event_type",
+                        "page",
+                        "seq",
+                        "session_id",
+                        "country",
+                        "device",
+                        "plan",
+                        "referrer",
+                        "started_at",
+                        "user_id"
+                    )
+                );
+                for (DriverProfile driver : dataDrivers(resp)) {
+                    List<String> readers = operators(driver).stream().filter(o -> o.startsWith("ValuesSourceReaderOperator")).toList();
+                    // the join key only: the other left fields are read on the node_reduce driver, after its top-n
+                    assertThat(readers.toString(), readers, everyItem(equalTo("ValuesSourceReaderOperator[fields = [session_id]]")));
+                }
             }
         }
     }
@@ -444,18 +520,19 @@ public class ColocatedJoinIT extends AbstractEsqlIntegTestCase {
      */
     public void testUnroutedLeftProfile() {
         createUnroutedEvents();
-        EsqlQueryRequest request = syncEsqlQueryRequest("FROM events_unrouted | JOIN sessions ON session_id | STATS n = COUNT(*)");
-        request.profile(true);
-        try (var resp = run(request)) {
-            assertValues(resp.values(), List.of(List.of(13L)));
-            List<DriverProfile> dataDrivers = resp.profile().drivers().stream().filter(d -> d.description().equals("data")).toList();
-            assertThat(dataDrivers, not(empty()));
-            for (DriverProfile driver : dataDrivers) {
-                List<String> operators = driver.operators().stream().map(OperatorStatus::operator).toList();
-                String lookup = operators.stream().filter(o -> o.startsWith("LookupOperator")).findFirst().orElse(null);
-                assertNotNull("no lookup operator in " + operators, lookup);
-                assertThat(lookup, containsString("colocated=true"));
-                assertThat(lookup, containsString("join=inner"));
+        for (boolean streaming : new boolean[] { false, true }) {
+            EsqlQueryRequest request = profiled("FROM events_unrouted | JOIN sessions ON session_id | STATS n = COUNT(*)", streaming);
+            try (var resp = run(request)) {
+                assertValues(resp.values(), List.of(List.of(13L)));
+                List<DriverProfile> dataDrivers = dataDrivers(resp);
+                assertThat(dataDrivers, not(empty()));
+                for (DriverProfile driver : dataDrivers) {
+                    String lookup = lookupOperator(operators(driver), streaming);
+                    assertThat(lookup, containsString("colocated=true"));
+                    assertThat(lookup, containsString("join=inner"));
+                    // COUNT(*) uses no right column
+                    assertThat(lookup, containsString("load_fields=[]"));
+                }
             }
         }
     }

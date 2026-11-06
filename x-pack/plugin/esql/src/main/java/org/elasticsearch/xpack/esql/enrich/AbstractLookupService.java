@@ -463,19 +463,70 @@ public abstract class AbstractLookupService<R extends AbstractLookupService.Requ
     }
 
     /**
+     * Sets up a streaming lookup session against one specific shard of a regular (possibly multi-shard) index, on a node the
+     * caller picked with {@link #shardCopyNode}. Used by the co-located join's streaming lookup; like the {@code lookupAsync}
+     * overload that takes a target node, it does not retry other copies.
+     */
+    public final void lookupAsyncOnShard(
+        R request,
+        int shardNumber,
+        DiscoveryNode targetNode,
+        CancellableTask parentTask,
+        ActionListener<LookupResponse> outListener
+    ) {
+        ShardIterator shardIt = shardCopies(request.index, shardNumber, clusterService.state(), outListener);
+        if (shardIt == null) {
+            return;
+        }
+        for (ShardRouting routing : shardIt) {
+            if (targetNode.getId().equals(routing.currentNodeId())) {
+                sendChildRequest(parentTask, outListener, targetNode, transportRequest(request, shardIt.shardId()));
+                return;
+            }
+        }
+        outListener.onFailure(
+            new UnavailableShardsException(shardIt.shardId(), "target node [" + targetNode.getId() + "] does not have this shard")
+        );
+    }
+
+    /**
+     * The node of the preferred copy of one shard of {@code index}: the copy on this node if there is one.
+     */
+    public final DiscoveryNode shardCopyNode(String index, int shardNumber) {
+        ClusterState state = clusterService.state();
+        ShardIterator copies = shardCopies(index, shardNumber, state);
+        ShardRouting copy = copies.nextOrNull();
+        if (copy == null) {
+            throw new UnavailableShardsException(copies.shardId(), "no active copy of the shard");
+        }
+        DiscoveryNode node = state.nodes().get(copy.currentNodeId());
+        if (node == null) {
+            throw new UnavailableShardsException(copies.shardId(), "node [" + copy.currentNodeId() + "] is not in the cluster state");
+        }
+        return node;
+    }
+
+    /**
      * The active, searchable copies of one shard of {@code index}, the copy on this node first.
      */
     @Nullable
     private ShardIterator shardCopies(String index, int shardNumber, ClusterState state, ActionListener<LookupResponse> listener) {
+        try {
+            return shardCopies(index, shardNumber, state);
+        } catch (RuntimeException e) {
+            listener.onFailure(e);
+            return null;
+        }
+    }
+
+    private ShardIterator shardCopies(String index, int shardNumber, ClusterState state) {
         var projectState = projectResolver.getProjectState(state);
         IndexMetadata indexMetadata = projectState.metadata().index(index);
         if (indexMetadata == null) {
-            listener.onFailure(new IndexNotFoundException(index));
-            return null;
+            throw new IndexNotFoundException(index);
         }
         if (shardNumber < 0 || shardNumber >= indexMetadata.getNumberOfShards()) {
-            listener.onFailure(new EsqlIllegalArgumentException("target index {} has no shard [{}]", index, shardNumber));
-            return null;
+            throw new EsqlIllegalArgumentException("target index {} has no shard [{}]", index, shardNumber);
         }
         ShardId shardId = new ShardId(indexMetadata.getIndex(), shardNumber);
         String localNodeId = state.nodes().getLocalNodeId();
