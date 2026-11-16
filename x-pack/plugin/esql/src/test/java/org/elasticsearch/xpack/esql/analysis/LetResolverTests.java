@@ -16,6 +16,7 @@ import org.elasticsearch.xpack.esql.expression.predicate.operator.comparison.InS
 import org.elasticsearch.xpack.esql.parser.ParsingException;
 import org.elasticsearch.xpack.esql.plan.IndexPattern;
 import org.elasticsearch.xpack.esql.plan.logical.Filter;
+import org.elasticsearch.xpack.esql.plan.logical.Keep;
 import org.elasticsearch.xpack.esql.plan.logical.Limit;
 import org.elasticsearch.xpack.esql.plan.logical.LogicalPlan;
 import org.elasticsearch.xpack.esql.plan.logical.Project;
@@ -27,11 +28,13 @@ import org.elasticsearch.xpack.esql.view.ViewResolver;
 import java.util.Collections;
 import java.util.List;
 
+import static org.elasticsearch.xpack.esql.EsqlTestUtils.as;
 import static org.elasticsearch.xpack.esql.core.tree.Source.EMPTY;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.sameInstance;
 import static org.hamcrest.Matchers.startsWith;
 
@@ -449,5 +452,123 @@ public class LetResolverTests extends ESTestCase {
     public void testCurrentBehaviorExclusionPatternDoesNotMatchBinding() {
         LogicalPlan result = parseAndResolveLet("LET x = (FROM sample_data METADATA _index); FROM sample_data, -x");
         assertUnresolvedRelation(result, "sample_data,-x");
+    }
+
+    public void testApplyRequestFilterOnMainQuery() {
+        assumeTrue("requires apply_request_filter on source command", EsqlCapabilities.Cap.APPLY_REQUEST_FILTER_SOURCE_OPTION.isEnabled());
+        LogicalPlan plan = parseAndResolveLet("""
+            LET sub = (FROM b | KEEP id);
+            FROM a, sub WITH {"apply_request_filter": false}
+            """);
+
+        UnionAll unionAll = as(plan, UnionAll.class);
+        assertEquals(2, unionAll.children().size());
+
+        Keep keep = as(unionAll.children().get(0), Keep.class);
+        UnresolvedRelation b = as(keep.child(), UnresolvedRelation.class);
+        assertEquals("b", b.indexPattern().indexPattern());
+        assertFalse(b.applyRequestFilter());
+        assertFalse(b.applyRequestFilterExplicit());
+
+        UnresolvedRelation a = as(unionAll.children().get(1), UnresolvedRelation.class);
+        assertEquals("a", a.indexPattern().indexPattern());
+        assertFalse(a.applyRequestFilter());
+        assertTrue(a.applyRequestFilterExplicit());
+    }
+
+    public void testApplyRequestFilterOnLetSubquery() {
+        assumeTrue("requires apply_request_filter on source command", EsqlCapabilities.Cap.APPLY_REQUEST_FILTER_SOURCE_OPTION.isEnabled());
+        LogicalPlan plan = parseAndResolveLet("""
+            LET sub = (FROM b WITH {"apply_request_filter": false} | KEEP id);
+            FROM sub
+            """);
+
+        assertEquals(1, plan.children().size());
+        Keep keep = as(plan, Keep.class);
+        UnresolvedRelation b = as(keep.child(), UnresolvedRelation.class);
+        assertEquals("b", b.indexPattern().indexPattern());
+        assertFalse(b.applyRequestFilter());
+        assertTrue(b.applyRequestFilterExplicit());
+    }
+
+    public void testApplyRequestFilterOnMainAndLetSubquery() {
+        assumeTrue("requires apply_request_filter on source command", EsqlCapabilities.Cap.APPLY_REQUEST_FILTER_SOURCE_OPTION.isEnabled());
+        LogicalPlan plan = parseAndResolveLet("""
+            LET sub = (FROM b WITH {"apply_request_filter": true} | KEEP id);
+            FROM sub WITH {"apply_request_filter": false}
+            """);
+
+        assertEquals(1, plan.children().size());
+        Keep keep = as(plan, Keep.class);
+        UnresolvedRelation b = as(keep.child(), UnresolvedRelation.class);
+        assertEquals("b", b.indexPattern().indexPattern());
+        assertTrue(b.applyRequestFilter());
+        assertTrue(b.applyRequestFilterExplicit());
+    }
+
+    public void testApplyRequestFilterOnInSubquery() {
+        assumeTrue("requires apply_request_filter on source command", EsqlCapabilities.Cap.APPLY_REQUEST_FILTER_SOURCE_OPTION.isEnabled());
+        LogicalPlan plan = parseAndResolveLet("""
+            LET sub = (FROM b | KEEP id);
+            FROM sub
+            | WHERE id IN (FROM sub WITH {"apply_request_filter": false})
+            """);
+
+        Filter filter = as(plan, Filter.class);
+        Keep keep = as(filter.child(), Keep.class);
+        UnresolvedRelation b = as(keep.child(), UnresolvedRelation.class);
+        assertTrue(b.applyRequestFilter());
+        assertFalse(b.applyRequestFilterExplicit());
+
+        InSubquery inSubquery = as(filter.condition(), InSubquery.class);
+        keep = as(inSubquery.subquery(), Keep.class);
+        b = as(keep.child(), UnresolvedRelation.class);
+        assertEquals("b", b.indexPattern().indexPattern());
+        assertFalse(b.applyRequestFilter());
+        assertFalse(b.applyRequestFilterExplicit());
+    }
+
+    public void testApplyRequestFilterOnLetSubqueryAndInSubquery() {
+        assumeTrue("requires apply_request_filter on source command", EsqlCapabilities.Cap.APPLY_REQUEST_FILTER_SOURCE_OPTION.isEnabled());
+        LogicalPlan plan = parseAndResolveLet("""
+            LET sub = (FROM b WITH {"apply_request_filter": true} | KEEP id);
+            FROM sub
+            | WHERE id IN (FROM sub WITH {"apply_request_filter": false})
+            """);
+
+        Filter filter = as(plan, Filter.class);
+        Keep keep = as(filter.child(), Keep.class);
+        UnresolvedRelation b = as(keep.child(), UnresolvedRelation.class);
+        assertTrue(b.applyRequestFilter());
+        assertTrue(b.applyRequestFilterExplicit());
+
+        InSubquery inSubquery = as(filter.condition(), InSubquery.class);
+        keep = as(inSubquery.subquery(), Keep.class);
+        b = as(keep.child(), UnresolvedRelation.class);
+        assertEquals("b", b.indexPattern().indexPattern());
+        assertTrue(b.applyRequestFilter());
+        assertTrue(b.applyRequestFilterExplicit());
+    }
+
+    public void testApplyRequestFilterOnMainAndInSubquery() {
+        assumeTrue("requires apply_request_filter on source command", EsqlCapabilities.Cap.APPLY_REQUEST_FILTER_SOURCE_OPTION.isEnabled());
+        LogicalPlan plan = parseAndResolveLet("""
+            LET sub = (FROM b | KEEP id);
+            FROM sub WITH {"apply_request_filter": true}
+            | WHERE id IN (FROM sub WITH {"apply_request_filter": false})
+            """);
+
+        Filter filter = as(plan, Filter.class);
+        Keep keep = as(filter.child(), Keep.class);
+        UnresolvedRelation b = as(keep.child(), UnresolvedRelation.class);
+        assertTrue(b.applyRequestFilter());
+        assertFalse(b.applyRequestFilterExplicit());
+
+        InSubquery inSubquery = as(filter.condition(), InSubquery.class);
+        keep = as(inSubquery.subquery(), Keep.class);
+        b = as(keep.child(), UnresolvedRelation.class);
+        assertEquals("b", b.indexPattern().indexPattern());
+        assertFalse(b.applyRequestFilter());
+        assertFalse(b.applyRequestFilterExplicit());
     }
 }

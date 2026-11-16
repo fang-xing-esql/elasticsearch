@@ -61,12 +61,22 @@ public class ViewShadowRelation extends LeafPlan implements Unresolvable {
     private final String viewName;
     private final Kind kind;
     private final String pattern;
+    private final boolean applyRequestFilter;
 
     public ViewShadowRelation(Source source, String viewName, Kind kind, String pattern) {
+        this(source, viewName, kind, pattern, true);
+    }
+
+    public ViewShadowRelation(Source source, String viewName, Kind kind, String pattern, boolean applyRequestFilter) {
         super(source);
         this.viewName = viewName;
         this.kind = kind;
         this.pattern = pattern;
+        this.applyRequestFilter = applyRequestFilter;
+    }
+
+    public boolean applyRequestFilter() {
+        return applyRequestFilter;
     }
 
     public String viewName() {
@@ -89,7 +99,7 @@ public class ViewShadowRelation extends LeafPlan implements Unresolvable {
 
     @Override
     protected NodeInfo<ViewShadowRelation> info() {
-        return NodeInfo.create(this, ViewShadowRelation::new, viewName, kind, pattern);
+        return NodeInfo.create(this, ViewShadowRelation::new, viewName, kind, pattern, applyRequestFilter);
     }
 
     @Override
@@ -114,7 +124,7 @@ public class ViewShadowRelation extends LeafPlan implements Unresolvable {
 
     @Override
     public int hashCode() {
-        return Objects.hash(source(), viewName, kind, pattern);
+        return Objects.hash(source(), viewName, kind, pattern, applyRequestFilter);
     }
 
     @Override
@@ -126,7 +136,10 @@ public class ViewShadowRelation extends LeafPlan implements Unresolvable {
             return false;
         }
         ViewShadowRelation other = (ViewShadowRelation) obj;
-        return Objects.equals(viewName, other.viewName) && Objects.equals(kind, other.kind) && Objects.equals(pattern, other.pattern);
+        return Objects.equals(viewName, other.viewName)
+            && Objects.equals(kind, other.kind)
+            && Objects.equals(pattern, other.pattern)
+            && applyRequestFilter == other.applyRequestFilter;
     }
 
     @Override

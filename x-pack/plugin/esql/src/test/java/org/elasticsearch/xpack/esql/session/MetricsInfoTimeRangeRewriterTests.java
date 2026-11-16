@@ -16,11 +16,13 @@ import org.elasticsearch.xpack.esql.analysis.AnalyzerTestCase;
 import org.elasticsearch.xpack.esql.core.expression.Literal;
 import org.elasticsearch.xpack.esql.core.expression.MetadataAttribute;
 import org.elasticsearch.xpack.esql.core.expression.NamedExpression;
+import org.elasticsearch.xpack.esql.core.tree.Source;
 import org.elasticsearch.xpack.esql.expression.predicate.operator.comparison.GreaterThanOrEqual;
 import org.elasticsearch.xpack.esql.plan.logical.EsRelation;
 import org.elasticsearch.xpack.esql.plan.logical.Filter;
 import org.elasticsearch.xpack.esql.plan.logical.LogicalPlan;
 import org.elasticsearch.xpack.esql.plan.logical.MetricsInfo;
+import org.elasticsearch.xpack.esql.plan.logical.UnionAll;
 
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
@@ -124,6 +126,37 @@ public class MetricsInfoTimeRangeRewriterTests extends AnalyzerTestCase {
         assertLimitedFrom(NOW.minus(1, ChronoUnit.HOURS), limited);
         MetricsInfo metricsInfo = limited.collect(MetricsInfo.class).getFirst();
         assertTrue("the bound sits under the info command", metricsInfo.anyMatch(Filter.class::isInstance));
+        assertWarnings(WARNING);
+    }
+
+    /**
+     * A requested window already inside the cap is left alone when every relation still applies the filter. One opted-out
+     * relation skips that early return: it is capped at {@code now - cap}, and a relation that did not opt out stays on the
+     * window anchored at the request range's end.
+     */
+    public void testOptedOutRelationUsesNowWhenTheRequestIsInsideTheCap() {
+        LogicalPlan optedIn = analyze(k8s(), "TS k8s | METRICS_INFO");
+        LogicalPlan optedOut = optedIn.transformDown(EsRelation.class, relation -> relation.withApplyRequestFilter(false));
+        QueryBuilder requested = range(NOW.minus(5, ChronoUnit.HOURS), NOW.minus(4, ChronoUnit.HOURS));
+        assertSame(optedIn, MetricsInfoTimeRangeRewriter.capTimeRange(optedIn, CAP, requested, NOW));
+
+        LogicalPlan limited = MetricsInfoTimeRangeRewriter.capTimeRange(
+            new UnionAll(Source.EMPTY, List.of(optedIn, optedOut), List.of()),
+            CAP,
+            requested,
+            NOW
+        );
+        List<MetricsInfo> infos = limited.collect(MetricsInfo.class);
+        assertThat(infos, hasSize(2));
+        for (MetricsInfo info : infos) {
+            EsRelation relation = info.collect(EsRelation.class).getFirst();
+            long bound = ((Number) lowerBound(info).value()).longValue();
+            if (relation.applyRequestFilter()) {
+                assertThat(bound, equalTo(NOW.minus(5, ChronoUnit.HOURS).toEpochMilli()));
+            } else {
+                assertThat(bound, equalTo(NOW.minus(1, ChronoUnit.HOURS).toEpochMilli()));
+            }
+        }
         assertWarnings(WARNING);
     }
 

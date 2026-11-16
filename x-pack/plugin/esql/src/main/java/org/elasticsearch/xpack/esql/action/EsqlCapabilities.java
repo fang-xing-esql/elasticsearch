@@ -4867,6 +4867,11 @@ public class EsqlCapabilities {
          */
         FIX_TS_STATS_BY_TSID,
 
+        /**
+         * {@code WITH {"apply_request_filter": ...}} on {@code FROM} and {@code TS}.
+         */
+        APPLY_REQUEST_FILTER_SOURCE_OPTION(Build.current().isSnapshot()),
+
         // Last capability should still have a comma for fewer merge conflicts when adding new ones :)
         // This comment prevents the semicolon from being on the previous capability when Spotless formats the file.
         ;

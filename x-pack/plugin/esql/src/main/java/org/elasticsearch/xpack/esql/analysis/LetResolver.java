@@ -15,6 +15,7 @@ import org.elasticsearch.xpack.esql.parser.ParsingException;
 import org.elasticsearch.xpack.esql.plan.IndexPattern;
 import org.elasticsearch.xpack.esql.plan.LetBinding;
 import org.elasticsearch.xpack.esql.plan.logical.LogicalPlan;
+import org.elasticsearch.xpack.esql.plan.logical.SourceCommandNamedParameters;
 import org.elasticsearch.xpack.esql.plan.logical.UnionAll;
 import org.elasticsearch.xpack.esql.plan.logical.UnresolvedRelation;
 
@@ -152,7 +153,11 @@ public final class LetResolver {
                         }
                         anyMatch = true;
                         addedNodes += sizes.get(current);
-                        result.add(bindingPlan);
+                        result.add(
+                            ur.applyRequestFilter()
+                                ? bindingPlan
+                                : SourceCommandNamedParameters.disableUnspecifiedRequestFilterInChildren(bindingPlan)
+                        );
                     } else {
                         // the query contained a reference to a binding that has not been resolved yet
                         if (allBindings.contains(current)) {
@@ -166,16 +171,7 @@ public final class LetResolver {
                 }
                 if (anyMatch) {
                     if (nonBindingPatterns.isEmpty() == false) {
-                        result.add(
-                            new UnresolvedRelation(
-                                ur.source(),
-                                new IndexPattern(ur.source(), String.join(",", nonBindingPatterns)),
-                                ur.frozen(),
-                                ur.metadataFields(),
-                                ur.indexMode(),
-                                null
-                            )
-                        );
+                        result.add(ur.withIndexPattern(new IndexPattern(ur.source(), String.join(",", nonBindingPatterns))));
                         nonBindingPatterns.clear();
                         addedNodes++;
                     }

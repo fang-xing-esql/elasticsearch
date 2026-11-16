@@ -236,7 +236,10 @@ public final class ViewRequestFilterRewriter {
         for (Map.Entry<String, LogicalPlan> entry : vua.namedSubqueries().entrySet()) {
             String key = entry.getKey();
             LogicalPlan child = entry.getValue();
-            if (vua.isViewBranch(key) == false) {
+            if (vua.isViewBranch(key) && vua.branchIdentity(key).applyRequestFilter() == false) {
+                // The query named this view with WITH {"apply_request_filter": false}. Leave its output unfiltered.
+                newSubqueries.put(key, child);
+            } else if (vua.isViewBranch(key) == false) {
                 LogicalPlan rewrittenChild = rewriteViewBoundaries(child, requestFilter, configuration, skipped, gated, minimumVersion);
                 newSubqueries.put(key, rewrittenChild);
                 changed |= rewrittenChild != child;

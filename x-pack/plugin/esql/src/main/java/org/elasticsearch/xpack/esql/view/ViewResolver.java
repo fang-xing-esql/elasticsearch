@@ -54,6 +54,7 @@ import org.elasticsearch.xpack.esql.plan.logical.Filter;
 import org.elasticsearch.xpack.esql.plan.logical.LogicalPlan;
 import org.elasticsearch.xpack.esql.plan.logical.MergePlan;
 import org.elasticsearch.xpack.esql.plan.logical.NamedSubquery;
+import org.elasticsearch.xpack.esql.plan.logical.SourceCommandNamedParameters;
 import org.elasticsearch.xpack.esql.plan.logical.Subquery;
 import org.elasticsearch.xpack.esql.plan.logical.UnresolvedMetadata;
 import org.elasticsearch.xpack.esql.plan.logical.UnresolvedRelation;
@@ -823,7 +824,8 @@ public class ViewResolver {
                                         unresolvedRelation.source(),
                                         view.name(),
                                         LinkedIndexPattern.Kind.OPTIONAL,
-                                        String.join(",", pattern)
+                                        String.join(",", pattern),
+                                        unresolvedRelation.applyRequestFilter()
                                     )
                                 );
                             } else if (isRequiredOnEveryProject) {
@@ -837,7 +839,8 @@ public class ViewResolver {
                                         unresolvedRelation.source(),
                                         view.name(),
                                         LinkedIndexPattern.Kind.REQUIRED,
-                                        String.join(",", pattern)
+                                        String.join(",", pattern),
+                                        unresolvedRelation.applyRequestFilter()
                                     )
                                 );
                             }
@@ -1257,28 +1260,11 @@ public class ViewResolver {
         if (filtered.length == patterns.length) {
             return ur;
         }
-        return new UnresolvedRelation(
-            ur.source(),
-            new IndexPattern(ur.indexPattern().source(), String.join(",", filtered)),
-            ur.frozen(),
-            ur.metadataFields(),
-            ur.indexMode(),
-            ur.unresolvedMessage()
-        );
+        return ur.withIndexPattern(new IndexPattern(ur.indexPattern().source(), String.join(",", filtered)));
     }
 
     private ViewPlan createUnresolvedRelationPlan(UnresolvedRelation ur, List<String> unresolvedPatterns) {
-        return new ViewPlan(
-            null,
-            new UnresolvedRelation(
-                ur.source(),
-                new IndexPattern(ur.indexPattern().source(), String.join(",", unresolvedPatterns)),
-                ur.frozen(),
-                ur.metadataFields(),
-                ur.indexMode(),
-                ur.unresolvedMessage()
-            )
-        );
+        return new ViewPlan(null, ur.withIndexPattern(new IndexPattern(ur.indexPattern().source(), String.join(",", unresolvedPatterns))));
     }
 
     // Visible for testing
@@ -1346,21 +1332,26 @@ public class ViewResolver {
                 assertNamesMatch("Unexpected subquery name mismatch", ns.name(), vp.name);
                 plans.put(key, ns);
                 // Identity carries the real view name; the key may be uniquified (e.g. "meow~2") and is just a label.
-                identities.put(key, BranchIdentity.view(vp.name));
+                identities.put(key, BranchIdentity.view(vp.name, ur.applyRequestFilter()));
             } else if (vp.plan instanceof UnresolvedRelation urp && urp.indexMode() == IndexMode.STANDARD) {
-                plans.put(key, urp);
+                // A pass-through view's body did not write the clause. The call-site flag still opts that index out,
+                // which is the same as opting out the view output when the view only reads the index.
+                LogicalPlan branch = ur.applyRequestFilter()
+                    ? urp
+                    : SourceCommandNamedParameters.disableUnspecifiedRequestFilterInChildren(urp);
+                plans.put(key, branch);
                 // Bare UnresolvedRelation branch: either a pass-through view or a plain index/alias
                 // ref from the user's query. Neither is a view branch — see the note above.
-                identities.put(key, BranchIdentity.INDEX);
+                identities.put(key, BranchIdentity.INDEX.withApplyRequestFilter(ur.applyRequestFilter()));
             } else if (vp.plan instanceof ViewShadowRelation) {
                 // Leave ViewShadowRelation bare — ViewCompaction's strip recognises it by
                 // type and removes it directly. Wrapping in NamedSubquery would hide it from the
                 // strip and keep its name out of the dropped-entries' keyspace.
                 plans.put(key, vp.plan);
-                identities.put(key, BranchIdentity.INDEX);
+                identities.put(key, BranchIdentity.INDEX.withApplyRequestFilter(ur.applyRequestFilter()));
             } else {
                 plans.put(key, new NamedSubquery(ur.source(), vp.plan, key));
-                identities.put(key, BranchIdentity.view(vp.name));
+                identities.put(key, BranchIdentity.view(vp.name, ur.applyRequestFilter()));
             }
         }
 

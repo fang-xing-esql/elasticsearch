@@ -54,6 +54,10 @@ public final class UnresolvedRelation extends LeafPlan implements Unresolvable, 
      * or a TS command (or maybe something else in the future)
      */
     private final String commandName;
+    /**
+     * Options from the command's {@code WITH} map. Coordinator-only: this node is not serialized.
+     */
+    private final CommandNamedParameters commandNamedParameters;
 
     public UnresolvedRelation(
         Source source,
@@ -63,7 +67,47 @@ public final class UnresolvedRelation extends LeafPlan implements Unresolvable, 
         String unresolvedMessage,
         SourceCommand sourceCommand
     ) {
-        this(source, indexPattern, frozen, metadataFields, sourceCommand.indexMode(), unresolvedMessage, sourceCommand.name());
+        this(
+            source,
+            indexPattern,
+            frozen,
+            metadataFields,
+            sourceCommand.indexMode(),
+            unresolvedMessage,
+            sourceCommand.name(),
+            CommandNamedParameters.EMPTY
+        );
+    }
+
+    public UnresolvedRelation(
+        Source source,
+        IndexPattern indexPattern,
+        boolean frozen,
+        List<NamedExpression> metadataFields,
+        IndexMode indexMode,
+        String unresolvedMessage,
+        @Nullable String commandName,
+        CommandNamedParameters commandNamedParameters
+    ) {
+        super(source);
+        this.indexPattern = indexPattern;
+        this.frozen = frozen;
+        this.metadataFields = metadataFields;
+        this.indexMode = indexMode;
+        this.unresolvedMsg = unresolvedMessage == null ? "Unknown index [" + indexPattern.indexPattern() + "]" : unresolvedMessage;
+        this.commandName = commandName;
+        this.commandNamedParameters = commandNamedParameters == null ? CommandNamedParameters.EMPTY : commandNamedParameters;
+    }
+
+    public UnresolvedRelation(
+        Source source,
+        IndexPattern table,
+        boolean frozen,
+        List<NamedExpression> metadataFields,
+        IndexMode indexMode,
+        String unresolvedMessage
+    ) {
+        this(source, table, frozen, metadataFields, indexMode, unresolvedMessage, null, CommandNamedParameters.EMPTY);
     }
 
     public UnresolvedRelation(
@@ -75,24 +119,7 @@ public final class UnresolvedRelation extends LeafPlan implements Unresolvable, 
         String unresolvedMessage,
         @Nullable String commandName
     ) {
-        super(source);
-        this.indexPattern = indexPattern;
-        this.frozen = frozen;
-        this.metadataFields = metadataFields;
-        this.indexMode = indexMode;
-        this.unresolvedMsg = unresolvedMessage == null ? "Unknown index [" + indexPattern.indexPattern() + "]" : unresolvedMessage;
-        this.commandName = commandName;
-    }
-
-    public UnresolvedRelation(
-        Source source,
-        IndexPattern table,
-        boolean frozen,
-        List<NamedExpression> metadataFields,
-        IndexMode indexMode,
-        String unresolvedMessage
-    ) {
-        this(source, table, frozen, metadataFields, indexMode, unresolvedMessage, null);
+        this(source, indexPattern, frozen, metadataFields, indexMode, unresolvedMessage, commandName, CommandNamedParameters.EMPTY);
     }
 
     @Override
@@ -107,7 +134,17 @@ public final class UnresolvedRelation extends LeafPlan implements Unresolvable, 
 
     @Override
     protected NodeInfo<UnresolvedRelation> info() {
-        return NodeInfo.create(this, UnresolvedRelation::new, indexPattern, frozen, metadataFields, indexMode, unresolvedMsg, commandName);
+        return NodeInfo.create(
+            this,
+            UnresolvedRelation::new,
+            indexPattern,
+            frozen,
+            metadataFields,
+            indexMode,
+            unresolvedMsg,
+            commandName,
+            commandNamedParameters
+        );
     }
 
     public IndexPattern indexPattern() {
@@ -117,7 +154,54 @@ public final class UnresolvedRelation extends LeafPlan implements Unresolvable, 
     public UnresolvedRelation withIndexPattern(IndexPattern newIndexPattern) {
         return newIndexPattern.equals(indexPattern)
             ? this
-            : new UnresolvedRelation(source(), newIndexPattern, frozen, metadataFields, indexMode, unresolvedMsg, commandName);
+            : new UnresolvedRelation(
+                source(),
+                newIndexPattern,
+                frozen,
+                metadataFields,
+                indexMode,
+                unresolvedMsg,
+                commandName,
+                commandNamedParameters
+            );
+    }
+
+    /** Options from this command's {@code WITH} map. Empty when the clause was absent. */
+    public CommandNamedParameters commandNamedParameters() {
+        return commandNamedParameters;
+    }
+
+    /** Whether the request DSL filter applies to this command. Absent means yes. */
+    public boolean applyRequestFilter() {
+        Object value = commandNamedParameters.get(SourceCommandNamedParameters.APPLY_REQUEST_FILTER);
+        return value == null || Boolean.TRUE.equals(value);
+    }
+
+    /** Whether this command wrote {@code apply_request_filter}, so an enclosing command does not overwrite it. */
+    public boolean applyRequestFilterExplicit() {
+        return commandNamedParameters.explicit(SourceCommandNamedParameters.APPLY_REQUEST_FILTER);
+    }
+
+    /** Records that this command does not apply the request filter, unless it already wrote the option. */
+    public UnresolvedRelation optOutOfRequestFilter() {
+        CommandNamedParameters updated = commandNamedParameters.withInherited(SourceCommandNamedParameters.APPLY_REQUEST_FILTER, false);
+        if (updated == commandNamedParameters) {
+            return this;
+        }
+        return new UnresolvedRelation(source(), indexPattern, frozen, metadataFields, indexMode, unresolvedMsg, commandName, updated);
+    }
+
+    public UnresolvedRelation withMetadata(List<NamedExpression> metadata, String unresolvedMessage) {
+        return new UnresolvedRelation(
+            source(),
+            indexPattern,
+            frozen,
+            metadata,
+            indexMode,
+            unresolvedMessage,
+            commandName,
+            commandNamedParameters
+        );
     }
 
     public boolean frozen() {
@@ -160,7 +244,16 @@ public final class UnresolvedRelation extends LeafPlan implements Unresolvable, 
     public UnresolvedRelation addMetadataField(MetadataAttribute newField) {
         ArrayList<NamedExpression> newFields = new ArrayList<>(metadataFields);
         newFields.add(newField);
-        return new UnresolvedRelation(source(), indexPattern, frozen, newFields, indexMode, unresolvedMsg, commandName);
+        return new UnresolvedRelation(
+            source(),
+            indexPattern,
+            frozen,
+            newFields,
+            indexMode,
+            unresolvedMsg,
+            commandName,
+            commandNamedParameters
+        );
     }
 
     public IndexMode indexMode() {
@@ -174,7 +267,7 @@ public final class UnresolvedRelation extends LeafPlan implements Unresolvable, 
 
     @Override
     public int hashCode() {
-        return Objects.hash(source(), indexPattern, metadataFields, indexMode, unresolvedMsg);
+        return Objects.hash(source(), indexPattern, metadataFields, indexMode, unresolvedMsg, commandNamedParameters);
     }
 
     @Override
@@ -192,7 +285,8 @@ public final class UnresolvedRelation extends LeafPlan implements Unresolvable, 
             && Objects.equals(frozen, other.frozen)
             && Objects.equals(metadataFields, other.metadataFields)
             && indexMode == other.indexMode
-            && Objects.equals(unresolvedMsg, other.unresolvedMsg);
+            && Objects.equals(unresolvedMsg, other.unresolvedMsg)
+            && Objects.equals(commandNamedParameters, other.commandNamedParameters);
     }
 
     @Override

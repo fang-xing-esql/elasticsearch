@@ -109,6 +109,19 @@ public class RequestFilterRewriterTests extends ESTestCase {
         assertWarnings("Request filter not applied to external datasets [ds], a node is too old to evaluate it; use WHERE instead");
     }
 
+    /** An opted-out dataset is named for that reason, not because a node is too old. */
+    public void testVersionGateNamesDatasetsThatDisabledTheRequestFilter() {
+        ExternalRelation optedOut = relation("dsOff", attr("a", DataType.INTEGER)).withApplyRequestFilter(false);
+        ExternalRelation kept = relation("dsOn", attr("a", DataType.INTEGER));
+        UnionAll union = new UnionAll(Source.EMPTY, List.of(optedOut, kept), List.of());
+        LogicalPlan result = RequestFilterRewriter.rewrite(union, QueryBuilders.termQuery("a", 1), CONFIG, TOO_OLD, false);
+        assertThat(result, sameInstance(union));
+        assertWarnings(
+            "Request filter not applied to external datasets [dsOn], a node is too old to evaluate it; use WHERE instead",
+            "Request filter not applied to external datasets [dsOff] because apply_request_filter is false"
+        );
+    }
+
     // ---- per-function version gating (elastic/elasticsearch#159672) ----
     //
     // CURRENT here is the rewrite's OWN pin, which is below esql_mv_compare — so it is exactly the window this gate

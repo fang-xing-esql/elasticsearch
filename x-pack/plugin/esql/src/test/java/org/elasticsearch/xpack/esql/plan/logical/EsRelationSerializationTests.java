@@ -51,6 +51,14 @@ public class EsRelationSerializationTests extends AbstractLogicalPlanSerializati
         return randomEsRelation();
     }
 
+    /** The flag is coordinator-only. A data node reconstructs it as true, including on the slices version. */
+    public void testApplyRequestFilterIsNotOnTheWire() throws IOException {
+        EsRelation optedOut = randomEsRelation().withApplyRequestFilter(false);
+        assertFalse(optedOut.applyRequestFilter());
+        assertTrue(copyInstance(optedOut, TransportVersion.current()).applyRequestFilter());
+        assertTrue(copyInstance(optedOut, EsRelation.SLICES).applyRequestFilter());
+    }
+
     @Override
     protected EsRelation mutateInstance(EsRelation instance) throws IOException {
         String indexPattern = instance.indexPattern();

@@ -103,6 +103,8 @@ public class ExternalRelation extends LeafPlan implements ExecutesOn.Coordinator
      * {@code dataset_declared_schema}.
      */
     private final DeclaredReadSpec declaredReadSpec;
+    /** Whether the request DSL filter applies. Coordinator-only: omitted from {@link #writeTo}. */
+    private final boolean applyRequestFilter;
 
     public ExternalRelation(
         Source source,
@@ -138,6 +140,21 @@ public class ExternalRelation extends LeafPlan implements ExecutesOn.Coordinator
         List<? extends NamedExpression> metadataFields,
         DeclaredReadSpec declaredReadSpec
     ) {
+        this(source, sourcePath, metadata, output, fileList, schemaMap, datasetName, metadataFields, declaredReadSpec, true);
+    }
+
+    public ExternalRelation(
+        Source source,
+        String sourcePath,
+        SourceMetadata metadata,
+        List<Attribute> output,
+        FileList fileList,
+        Map<StoragePath, SchemaReconciliation.FileSchemaInfo> schemaMap,
+        @Nullable String datasetName,
+        List<? extends NamedExpression> metadataFields,
+        DeclaredReadSpec declaredReadSpec,
+        boolean applyRequestFilter
+    ) {
         super(source);
         if (sourcePath == null) {
             throw new IllegalArgumentException("sourcePath must not be null");
@@ -156,6 +173,7 @@ public class ExternalRelation extends LeafPlan implements ExecutesOn.Coordinator
         this.datasetName = datasetName;
         this.metadataFields = metadataFields != null ? metadataFields : List.of();
         this.declaredReadSpec = declaredReadSpec != null ? declaredReadSpec : DeclaredReadSpec.NONE;
+        this.applyRequestFilter = applyRequestFilter;
     }
 
     private static ExternalRelation readFrom(StreamInput in) throws IOException {
@@ -237,8 +255,30 @@ public class ExternalRelation extends LeafPlan implements ExecutesOn.Coordinator
             schemaMap,
             datasetName,
             metadataFields,
-            declaredReadSpec
+            declaredReadSpec,
+            applyRequestFilter
         );
+    }
+
+    public boolean applyRequestFilter() {
+        return applyRequestFilter;
+    }
+
+    public ExternalRelation withApplyRequestFilter(boolean applyRequestFilter) {
+        return this.applyRequestFilter == applyRequestFilter
+            ? this
+            : new ExternalRelation(
+                source(),
+                sourcePath,
+                metadata,
+                output,
+                fileList,
+                schemaMap,
+                datasetName,
+                metadataFields,
+                declaredReadSpec,
+                applyRequestFilter
+            );
     }
 
     public String sourcePath() {
@@ -360,7 +400,17 @@ public class ExternalRelation extends LeafPlan implements ExecutesOn.Coordinator
 
     @Override
     public int hashCode() {
-        return Objects.hash(sourcePath, metadata, output, fileList, schemaMap, datasetName, metadataFields, declaredReadSpec);
+        return Objects.hash(
+            sourcePath,
+            metadata,
+            output,
+            fileList,
+            schemaMap,
+            datasetName,
+            metadataFields,
+            declaredReadSpec,
+            applyRequestFilter
+        );
     }
 
     @Override
@@ -381,7 +431,8 @@ public class ExternalRelation extends LeafPlan implements ExecutesOn.Coordinator
             && Objects.equals(schemaMap, other.schemaMap)
             && Objects.equals(datasetName, other.datasetName)
             && Objects.equals(metadataFields, other.metadataFields)
-            && Objects.equals(declaredReadSpec, other.declaredReadSpec);
+            && Objects.equals(declaredReadSpec, other.declaredReadSpec)
+            && applyRequestFilter == other.applyRequestFilter;
     }
 
     @Override
@@ -415,7 +466,8 @@ public class ExternalRelation extends LeafPlan implements ExecutesOn.Coordinator
             schemaMap,
             datasetName,
             metadataFields,
-            declaredReadSpec
+            declaredReadSpec,
+            applyRequestFilter
         );
     }
 
@@ -434,7 +486,8 @@ public class ExternalRelation extends LeafPlan implements ExecutesOn.Coordinator
             schemaMap,
             datasetName,
             metadataFields,
-            declaredReadSpec
+            declaredReadSpec,
+            applyRequestFilter
         );
     }
 
@@ -453,7 +506,8 @@ public class ExternalRelation extends LeafPlan implements ExecutesOn.Coordinator
             newSchemaMap,
             datasetName,
             metadataFields,
-            declaredReadSpec
+            declaredReadSpec,
+            applyRequestFilter
         );
     }
 }

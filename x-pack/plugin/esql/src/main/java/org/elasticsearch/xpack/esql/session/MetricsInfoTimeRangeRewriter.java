@@ -71,12 +71,19 @@ final class MetricsInfoTimeRangeRewriter {
     private static LogicalPlan capTimeRange(LogicalPlan plan, TimeValue maxTimeRange, @Nullable TimestampBounds requested, Instant now) {
         Instant end = requested == null ? now : requested.end();
         Instant from = Instant.ofEpochMilli(Math.max(end.toEpochMilli() - maxTimeRange.millis(), 0));
-        if (requested != null && from.isAfter(requested.start()) == false) {
+        Instant unfilteredFrom = Instant.ofEpochMilli(Math.max(now.toEpochMilli() - maxTimeRange.millis(), 0));
+        boolean anyOptOut = plan.anyMatch(node -> node instanceof EsRelation relation && relation.applyRequestFilter() == false);
+        if (anyOptOut == false && requested != null && from.isAfter(requested.start()) == false) {
             return plan;
         }
         var rewritten = plan.transformUp(UnaryPlan.class, p -> {
             if (p instanceof TsInfo || p instanceof MetricsInfo) {
-                LogicalPlan capped = p.child().transformUp(EsRelation.class, r -> capRelation(r, from));
+                LogicalPlan capped = p.child().transformUp(EsRelation.class, relation -> {
+                    if (relation.applyRequestFilter() == false) {
+                        return capRelation(relation, unfilteredFrom);
+                    }
+                    return capRelation(relation, from);
+                });
                 return capped == p.child() ? p : p.replaceChild(capped);
             }
             return p;

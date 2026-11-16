@@ -68,6 +68,7 @@ import org.elasticsearch.xpack.esql.plan.LetBinding;
 import org.elasticsearch.xpack.esql.plan.QuerySetting;
 import org.elasticsearch.xpack.esql.plan.logical.Aggregate;
 import org.elasticsearch.xpack.esql.plan.logical.ChangePoint;
+import org.elasticsearch.xpack.esql.plan.logical.CommandNamedParameters;
 import org.elasticsearch.xpack.esql.plan.logical.Dedup;
 import org.elasticsearch.xpack.esql.plan.logical.Describe;
 import org.elasticsearch.xpack.esql.plan.logical.Dissect;
@@ -98,6 +99,7 @@ import org.elasticsearch.xpack.esql.plan.logical.Rename;
 import org.elasticsearch.xpack.esql.plan.logical.Row;
 import org.elasticsearch.xpack.esql.plan.logical.Sample;
 import org.elasticsearch.xpack.esql.plan.logical.SourceCommand;
+import org.elasticsearch.xpack.esql.plan.logical.SourceCommandNamedParameters;
 import org.elasticsearch.xpack.esql.plan.logical.Subquery;
 import org.elasticsearch.xpack.esql.plan.logical.TimeSeriesAggregate;
 import org.elasticsearch.xpack.esql.plan.logical.TimeSeriesCollapse;
@@ -437,7 +439,21 @@ public class LogicalPlanBuilder extends ExpressionBuilder {
         IndexPattern table = new IndexPattern(source, visitIndexPattern(indexPatternsCtx));
         List<Subquery> subqueries = visitSubqueriesInFromCommand(subqueriesCtx);
         List<NamedExpression> metadataFields = visitMetadataFields(ctx.metadata());
-        UnresolvedRelation unresolvedRelation = new UnresolvedRelation(source, table, false, metadataFields, null, command);
+        MapExpression options = visitSourceCommandNamedParameters(ctx.sourceCommandNamedParameters());
+        CommandNamedParameters commandNamedParameters = options == null
+            ? CommandNamedParameters.EMPTY
+            : SourceCommandNamedParameters.commandNamedParameters(source, foldOptionLiterals(command.name(), options.keyFoldedMap()));
+
+        UnresolvedRelation unresolvedRelation = new UnresolvedRelation(
+            source,
+            table,
+            false,
+            metadataFields,
+            command.indexMode(),
+            null,
+            command.name(),
+            commandNamedParameters
+        );
         if (subqueries.isEmpty()) {
             if (metadataFields.isEmpty()) {
                 return unresolvedRelation;
@@ -465,10 +481,17 @@ public class LogicalPlanBuilder extends ExpressionBuilder {
                 inner = new UnionAll(source(ctxs.getFirst(), ctxs.getLast()), mainQueryAndSubqueries, List.of());
             }
 
+            // Copy false onto nested source commands only when this command wrote apply_request_filter: false.
+            // An omitted WITH and an explicit true both leave those commands as they were parsed.
             if (metadataFields.isEmpty()) {
-                return inner;
+                return unresolvedRelation.applyRequestFilter()
+                    ? inner
+                    : SourceCommandNamedParameters.disableUnspecifiedRequestFilterInChildren(inner);
             }
-            return new UnresolvedMetadata(source(ctxs.getFirst(), ctxs.getLast()), inner, metadataFields);
+            LogicalPlan withMetadata = new UnresolvedMetadata(source(ctxs.getFirst(), ctxs.getLast()), inner, metadataFields);
+            return unresolvedRelation.applyRequestFilter()
+                ? withMetadata
+                : SourceCommandNamedParameters.disableUnspecifiedRequestFilterInChildren(withMetadata);
         }
     }
 

@@ -34,6 +34,7 @@ import org.elasticsearch.xpack.esql.plan.logical.LogicalPlan;
 import org.elasticsearch.xpack.esql.plan.logical.MergePlan;
 import org.elasticsearch.xpack.esql.plan.logical.MetricsInfo;
 import org.elasticsearch.xpack.esql.plan.logical.PipelineBreaker;
+import org.elasticsearch.xpack.esql.plan.logical.SourceCommandNamedParameters;
 import org.elasticsearch.xpack.esql.plan.logical.TimeSeriesAggregate;
 import org.elasticsearch.xpack.esql.plan.logical.TopN;
 import org.elasticsearch.xpack.esql.plan.logical.TopNBy;
@@ -357,6 +358,14 @@ public class Mapper {
                 // Actual view branch: mark every FragmentExec in the subtree so integrateEsFilterIntoFragment skips them.
                 // Bare-index branches (key "main") and literal-subquery branches ("unnamed_view_<hash>") are excluded.
                 child = child.transformDown(FragmentExec.class, FragmentExec::asFromViewBranch);
+                if (vua.branchIdentity(viewKeys.get(i)).applyRequestFilter() == false) {
+                    // The call site opted out. Skip the Lucene fallback too, including on a cluster too old for the
+                    // output rewrite. The view body's own plan is left alone until this physical copy.
+                    child = child.transformDown(
+                        FragmentExec.class,
+                        fe -> fe.withFragment(SourceCommandNamedParameters.optOutResolved(fe.fragment()))
+                    );
+                }
             }
             if (child instanceof FragmentExec) {
                 child = new ExchangeExec(child.source(), child);

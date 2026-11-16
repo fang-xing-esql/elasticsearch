@@ -36,8 +36,10 @@ import org.elasticsearch.xpack.esql.datasources.metadata.DataSourceSetting;
 import org.elasticsearch.xpack.esql.plan.IndexPattern;
 import org.elasticsearch.xpack.esql.plan.logical.BranchIdentity;
 import org.elasticsearch.xpack.esql.plan.logical.BranchPlan;
+import org.elasticsearch.xpack.esql.plan.logical.CommandNamedParameters;
 import org.elasticsearch.xpack.esql.plan.logical.DatasetShadowRelation;
 import org.elasticsearch.xpack.esql.plan.logical.LogicalPlan;
+import org.elasticsearch.xpack.esql.plan.logical.SourceCommandNamedParameters;
 import org.elasticsearch.xpack.esql.plan.logical.UnionAll;
 import org.elasticsearch.xpack.esql.plan.logical.UnresolvedExternalRelation;
 import org.elasticsearch.xpack.esql.plan.logical.UnresolvedRelation;
@@ -51,6 +53,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import static org.elasticsearch.xpack.esql.EsqlTestUtils.as;
 import static org.elasticsearch.xpack.esql.EsqlTestUtils.rewriteDatasetsUnsecured;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.containsString;
@@ -195,6 +198,36 @@ public class DatasetRewriterTests extends ESTestCase {
         assertThat(union.children(), hasSize(2));
         assertThat(union.children().get(0), instanceOf(UnresolvedExternalRelation.class));
         assertThat(union.children().get(1), instanceOf(UnresolvedExternalRelation.class));
+    }
+
+    public void testApplyRequestFilterIsCopiedOntoDatasetAndIndexBranches() {
+        DataSource parent = dataSource("s3_parent", Map.of());
+        Dataset dataset = new Dataset("logs", new DataSourceReference("s3_parent"), "s3://logs/", null, Map.of());
+        ProjectMetadata project = projectWithIndices(Map.of("s3_parent", parent), Map.of("logs", dataset), Set.of("some_idx"));
+        CommandNamedParameters optedOut = new CommandNamedParameters(Map.of(SourceCommandNamedParameters.APPLY_REQUEST_FILTER, false));
+        UnresolvedRelation relation = new UnresolvedRelation(
+            Source.EMPTY,
+            new IndexPattern(Source.EMPTY, "some_idx,logs"),
+            false,
+            List.of(),
+            IndexMode.STANDARD,
+            null,
+            "FROM",
+            optedOut
+        );
+
+        LogicalPlan rewritten = rewrite(relation, project);
+
+        BranchPlan plan = as(rewritten, BranchPlan.class);
+        UnresolvedExternalRelation datasetBranch = as(plan.children().get(0), UnresolvedExternalRelation.class);
+        assertFalse(datasetBranch.applyRequestFilter());
+        assertTrue(datasetBranch.applyRequestFilterExplicit());
+        UnresolvedRelation indexBranch = as(plan.children().get(1), UnresolvedRelation.class);
+        assertFalse(indexBranch.applyRequestFilter());
+        assertTrue(indexBranch.applyRequestFilterExplicit());
+        assertFalse(plan.branchIdentity("logs").applyRequestFilter());
+        assertFalse(plan.branchIdentity(null).applyRequestFilter());
+        assertFalse(plan.isViewBranch("logs"));
     }
 
     public void testMixedDatasetsAndNonDatasetsProducesUnionAll() {

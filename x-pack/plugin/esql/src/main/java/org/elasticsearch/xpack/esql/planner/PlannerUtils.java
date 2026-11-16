@@ -59,6 +59,7 @@ import org.elasticsearch.xpack.esql.optimizer.LocalPhysicalPlanOptimizer;
 import org.elasticsearch.xpack.esql.optimizer.rules.physical.local.LucenePushdownPredicates;
 import org.elasticsearch.xpack.esql.plan.QueryPlan;
 import org.elasticsearch.xpack.esql.plan.logical.EsRelation;
+import org.elasticsearch.xpack.esql.plan.logical.ExternalRelation;
 import org.elasticsearch.xpack.esql.plan.logical.Filter;
 import org.elasticsearch.xpack.esql.plan.logical.LeafPlan;
 import org.elasticsearch.xpack.esql.plan.logical.Limit;
@@ -536,6 +537,10 @@ public class PlannerUtils {
         }
         boolean viewBranchesFilteredAtOutput = ViewRequestFilterRewriter.supportsRewrite(minimumVersion);
         return plan.transformUp(FragmentExec.class, f -> {
+            // A source command that opted out, including the sources of a view whose call site opted out.
+            if (fragmentOptsOut(f.fragment())) {
+                return f;
+            }
             // View-branch fragments must not receive the Lucene esFilter: the request filter has already been applied
             // as a logical Filter above the view's output boundary (by ViewRequestFilterRewriter). Pushing the raw DSL
             // filter into the Lucene scan would apply it before any aggregation or field computation the view performs,
@@ -701,8 +706,14 @@ public class PlannerUtils {
         // first position is the REST filter, the second the query filter
         final List<QueryBuilder> requestFilters = new ArrayList<>();
         final LucenePushdownPredicates ctx = LucenePushdownPredicates.forCanMatch(minTransportVersion, flags);
+        // A fragment that opted out has no request esFilter. ANDing the other fragments' request filter into one
+        // node-level can_match would drop shards of the opted-out index. Omit that portion unless every fragment
+        // still carries it. Query-text filters below are unchanged. Plans that never opt out keep today's can_match.
+        boolean everyFragmentCarriesRequestFilter = plan.collect(FragmentExec.class::isInstance)
+            .stream()
+            .allMatch(fragment -> fragmentOptsOut(((FragmentExec) fragment).fragment()) == false);
         plan.forEachDown(FragmentExec.class, fe -> {
-            if (fe.esFilter() != null && fe.esFilter().supportsVersion(minTransportVersion)) {
+            if (everyFragmentCarriesRequestFilter && fe.esFilter() != null && fe.esFilter().supportsVersion(minTransportVersion)) {
                 requestFilters.add(fe.esFilter());
             }
             // detect filter inside the query
@@ -867,5 +878,12 @@ public class PlannerUtils {
             // The conversion reads the field where an index does not map it
             unionTypes.getUnmappedConversionExpression().forEachDown(FieldAttribute.class, inner -> names.add(inner.fieldName().string()));
         }
+    }
+
+    private static boolean fragmentOptsOut(LogicalPlan fragment) {
+        return fragment.anyMatch(
+            node -> (node instanceof EsRelation es && es.applyRequestFilter() == false)
+                || (node instanceof ExternalRelation external && external.applyRequestFilter() == false)
+        );
     }
 }

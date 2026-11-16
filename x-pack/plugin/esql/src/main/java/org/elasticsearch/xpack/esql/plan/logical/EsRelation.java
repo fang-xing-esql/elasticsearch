@@ -61,6 +61,11 @@ public class EsRelation extends LeafPlan implements ClassifiedAs.Index {
      * The slices this relation reads, recorded by {@code SelectSlicesFromFilter} from a filter that stays in the plan.
      */
     private final SliceSelection slices;
+    /**
+     * Whether the request DSL filter applies to this relation. Coordinator-only: not written by {@link #writeTo}.
+     * A data node reconstructs this as {@code true}; the coordinator has already decided the fragment {@code esFilter}.
+     */
+    private final boolean applyRequestFilter;
 
     public EsRelation(
         Source source,
@@ -84,6 +89,20 @@ public class EsRelation extends LeafPlan implements ClassifiedAs.Index {
         List<Attribute> attributes,
         SliceSelection slices
     ) {
+        this(source, indexPattern, indexMode, originalIndices, concreteIndices, indexProperties, attributes, slices, true);
+    }
+
+    public EsRelation(
+        Source source,
+        String indexPattern,
+        IndexMode indexMode,
+        Map<String, List<String>> originalIndices,
+        Map<String, List<String>> concreteIndices,
+        Map<String, IndexProperties> indexProperties,
+        List<Attribute> attributes,
+        SliceSelection slices,
+        boolean applyRequestFilter
+    ) {
         super(source);
         this.slices = Objects.requireNonNull(slices);
         this.indexPattern = indexPattern;
@@ -92,6 +111,7 @@ public class EsRelation extends LeafPlan implements ClassifiedAs.Index {
         this.concreteIndices = concreteIndices;
         this.indexProperties = indexProperties;
         this.attrs = attributes;
+        this.applyRequestFilter = applyRequestFilter;
     }
 
     private static EsRelation readFrom(StreamInput in) throws IOException {
@@ -148,8 +168,30 @@ public class EsRelation extends LeafPlan implements ClassifiedAs.Index {
             concreteIndices,
             indexProperties,
             attrs,
-            slices
+            slices,
+            applyRequestFilter
         );
+    }
+
+    /** Whether the request DSL filter applies to this relation. */
+    public boolean applyRequestFilter() {
+        return applyRequestFilter;
+    }
+
+    public EsRelation withApplyRequestFilter(boolean applyRequestFilter) {
+        return this.applyRequestFilter == applyRequestFilter
+            ? this
+            : new EsRelation(
+                source(),
+                indexPattern,
+                indexMode,
+                originalIndices,
+                concreteIndices,
+                indexProperties,
+                attrs,
+                slices,
+                applyRequestFilter
+            );
     }
 
     public String indexPattern() {
@@ -194,7 +236,7 @@ public class EsRelation extends LeafPlan implements ClassifiedAs.Index {
 
     @Override
     public int hashCode() {
-        return Objects.hash(indexPattern, indexMode, originalIndices, concreteIndices, indexProperties, attrs, slices);
+        return Objects.hash(indexPattern, indexMode, originalIndices, concreteIndices, indexProperties, attrs, slices, applyRequestFilter);
     }
 
     @Override
@@ -214,7 +256,8 @@ public class EsRelation extends LeafPlan implements ClassifiedAs.Index {
             && Objects.equals(concreteIndices, other.concreteIndices)
             && Objects.equals(indexProperties, other.indexProperties)
             && Objects.equals(attrs, other.attrs)
-            && Objects.equals(slices, other.slices);
+            && Objects.equals(slices, other.slices)
+            && applyRequestFilter == other.applyRequestFilter;
     }
 
     @Override
@@ -225,6 +268,9 @@ public class EsRelation extends LeafPlan implements ClassifiedAs.Index {
         }
         if (slices.isSpecified()) {
             sb.append("[slice=").append(slices.toSearchSlice()).append(']');
+        }
+        if (applyRequestFilter == false) {
+            sb.append("[apply_request_filter=false]");
         }
         // The concrete indices a pattern resolved to, each routed through the index mapper. Rendered
         // in both modes — useful when debugging from a failure log. NOTE: this is NEW under the
@@ -266,7 +312,17 @@ public class EsRelation extends LeafPlan implements ClassifiedAs.Index {
     }
 
     public EsRelation withAttributes(List<Attribute> newAttributes) {
-        return new EsRelation(source(), indexPattern, indexMode, originalIndices, concreteIndices, indexProperties, newAttributes, slices);
+        return new EsRelation(
+            source(),
+            indexPattern,
+            indexMode,
+            originalIndices,
+            concreteIndices,
+            indexProperties,
+            newAttributes,
+            slices,
+            applyRequestFilter
+        );
     }
 
     public EsRelation withAdditionalAttributes(List<? extends Attribute> additionalAttributes) {
@@ -284,10 +340,30 @@ public class EsRelation extends LeafPlan implements ClassifiedAs.Index {
     }
 
     public EsRelation withSlices(SliceSelection newSlices) {
-        return new EsRelation(source(), indexPattern, indexMode, originalIndices, concreteIndices, indexProperties, attrs, newSlices);
+        return new EsRelation(
+            source(),
+            indexPattern,
+            indexMode,
+            originalIndices,
+            concreteIndices,
+            indexProperties,
+            attrs,
+            newSlices,
+            applyRequestFilter
+        );
     }
 
     public EsRelation withIndexMode(IndexMode indexMode) {
-        return new EsRelation(source(), indexPattern, indexMode, originalIndices, concreteIndices, indexProperties, attrs, slices);
+        return new EsRelation(
+            source(),
+            indexPattern,
+            indexMode,
+            originalIndices,
+            concreteIndices,
+            indexProperties,
+            attrs,
+            slices,
+            applyRequestFilter
+        );
     }
 }

@@ -49,6 +49,8 @@ public final class UnresolvedExternalRelation extends LeafPlan implements Unreso
     @Nullable
     private final DatasetMapping mapping;
     private final String unresolvedMsg;
+    /** {@code WITH} options copied from the {@code FROM} or {@code TS} command. Empty for inline {@code EXTERNAL}. */
+    private final CommandNamedParameters commandNamedParameters;
 
     /**
      * Creates an unresolved external relation with no METADATA fields. Convenience overload for
@@ -105,6 +107,17 @@ public final class UnresolvedExternalRelation extends LeafPlan implements Unreso
         this(source, tablePath, config, metadataFields, datasetName, null);
     }
 
+    public UnresolvedExternalRelation(
+        Source source,
+        Expression tablePath,
+        Map<String, Object> config,
+        List<NamedExpression> metadataFields,
+        @Nullable String datasetName,
+        @Nullable DatasetMapping mapping
+    ) {
+        this(source, tablePath, config, metadataFields, datasetName, mapping, CommandNamedParameters.EMPTY);
+    }
+
     /**
      * Full constructor carrying the dataset's user-declared mapping ({@link DatasetMapping}), if any. Only the
      * {@code FROM <dataset>} path (via {@code DatasetRewriter}) supplies a non-null mapping; the inline
@@ -117,7 +130,8 @@ public final class UnresolvedExternalRelation extends LeafPlan implements Unreso
         Map<String, Object> config,
         List<NamedExpression> metadataFields,
         @Nullable String datasetName,
-        @Nullable DatasetMapping mapping
+        @Nullable DatasetMapping mapping,
+        CommandNamedParameters commandNamedParameters
     ) {
         super(source);
         this.tablePath = tablePath;
@@ -125,6 +139,7 @@ public final class UnresolvedExternalRelation extends LeafPlan implements Unreso
         this.metadataFields = Objects.requireNonNull(metadataFields, "metadataFields");
         this.datasetName = datasetName;
         this.mapping = mapping;
+        this.commandNamedParameters = commandNamedParameters == null ? CommandNamedParameters.EMPTY : commandNamedParameters;
         this.unresolvedMsg = "Unknown external table or Parquet file [" + extractTablePathValue(tablePath) + "]";
     }
 
@@ -151,7 +166,16 @@ public final class UnresolvedExternalRelation extends LeafPlan implements Unreso
 
     @Override
     protected NodeInfo<UnresolvedExternalRelation> info() {
-        return NodeInfo.create(this, UnresolvedExternalRelation::new, tablePath, config, metadataFields, datasetName, mapping);
+        return NodeInfo.create(
+            this,
+            UnresolvedExternalRelation::new,
+            tablePath,
+            config,
+            metadataFields,
+            datasetName,
+            mapping,
+            commandNamedParameters
+        );
     }
 
     public Expression tablePath() {
@@ -185,6 +209,26 @@ public final class UnresolvedExternalRelation extends LeafPlan implements Unreso
         return mapping;
     }
 
+    /** Whether the request DSL filter applies to this command. Absent means yes. */
+    public boolean applyRequestFilter() {
+        Object value = commandNamedParameters.get(SourceCommandNamedParameters.APPLY_REQUEST_FILTER);
+        return value == null || Boolean.TRUE.equals(value);
+    }
+
+    /** Whether this command wrote {@code apply_request_filter}, so an enclosing command does not overwrite it. */
+    public boolean applyRequestFilterExplicit() {
+        return commandNamedParameters.explicit(SourceCommandNamedParameters.APPLY_REQUEST_FILTER);
+    }
+
+    /** Records that this command does not apply the request filter, unless it already wrote the option. */
+    public UnresolvedExternalRelation optOutOfRequestFilter() {
+        CommandNamedParameters updated = commandNamedParameters.withInherited(SourceCommandNamedParameters.APPLY_REQUEST_FILTER, false);
+        if (updated == commandNamedParameters) {
+            return this;
+        }
+        return new UnresolvedExternalRelation(source(), tablePath, config, metadataFields, datasetName, mapping, updated);
+    }
+
     @Override
     public boolean resolved() {
         return false;
@@ -209,7 +253,7 @@ public final class UnresolvedExternalRelation extends LeafPlan implements Unreso
     public int hashCode() {
         // No source(): equals() below ignores it, and the equals/hashCode contract requires equal
         // nodes to hash equal (same node parsed at two positions must collapse in plan-node sets).
-        return Objects.hash(tablePath, config, metadataFields, datasetName, mapping, unresolvedMsg);
+        return Objects.hash(tablePath, config, metadataFields, datasetName, mapping, unresolvedMsg, commandNamedParameters);
     }
 
     @Override
@@ -228,7 +272,8 @@ public final class UnresolvedExternalRelation extends LeafPlan implements Unreso
             && Objects.equals(metadataFields, other.metadataFields)
             && Objects.equals(datasetName, other.datasetName)
             && Objects.equals(mapping, other.mapping)
-            && Objects.equals(unresolvedMsg, other.unresolvedMsg);
+            && Objects.equals(unresolvedMsg, other.unresolvedMsg)
+            && Objects.equals(commandNamedParameters, other.commandNamedParameters);
     }
 
     @Override

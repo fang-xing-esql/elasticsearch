@@ -583,6 +583,10 @@ public class ViewCompaction extends Rule<LogicalPlan, LogicalPlan> {
         if (metadataNames(main).equals(metadataNames(other)) == false) {
             return null;
         }
+        // Options must match, including which keys each command wrote. A later key is another map entry.
+        if (main.commandNamedParameters().equals(other.commandNamedParameters()) == false) {
+            return null;
+        }
         String[] otherPatterns = other.indexPattern().indexPattern().split(",");
         for (String mainPattern : main.indexPattern().indexPattern().split(",")) {
             for (String otherPattern : otherPatterns) {
@@ -619,13 +623,8 @@ public class ViewCompaction extends Rule<LogicalPlan, LogicalPlan> {
                 }
             }
         }
-        return new UnresolvedRelation(
-            main.source(),
-            new IndexPattern(main.indexPattern().source(), main.indexPattern().indexPattern() + "," + other.indexPattern().indexPattern()),
-            main.frozen(),
-            main.metadataFields(),
-            main.indexMode(),
-            main.unresolvedMessage()
+        return main.withIndexPattern(
+            new IndexPattern(main.indexPattern().source(), main.indexPattern().indexPattern() + "," + other.indexPattern().indexPattern())
         );
     }
 

@@ -52,12 +52,22 @@ public class DatasetShadowRelation extends LeafPlan implements Unresolvable {
     private final String datasetName;
     private final Kind kind;
     private final String pattern;
+    private final boolean applyRequestFilter;
 
     public DatasetShadowRelation(Source source, String datasetName, Kind kind, String pattern) {
+        this(source, datasetName, kind, pattern, true);
+    }
+
+    public DatasetShadowRelation(Source source, String datasetName, Kind kind, String pattern, boolean applyRequestFilter) {
         super(source);
         this.datasetName = datasetName;
         this.kind = kind;
         this.pattern = pattern;
+        this.applyRequestFilter = applyRequestFilter;
+    }
+
+    public boolean applyRequestFilter() {
+        return applyRequestFilter;
     }
 
     public String datasetName() {
@@ -80,7 +90,7 @@ public class DatasetShadowRelation extends LeafPlan implements Unresolvable {
 
     @Override
     protected NodeInfo<DatasetShadowRelation> info() {
-        return NodeInfo.create(this, DatasetShadowRelation::new, datasetName, kind, pattern);
+        return NodeInfo.create(this, DatasetShadowRelation::new, datasetName, kind, pattern, applyRequestFilter);
     }
 
     @Override
@@ -105,7 +115,7 @@ public class DatasetShadowRelation extends LeafPlan implements Unresolvable {
 
     @Override
     public int hashCode() {
-        return Objects.hash(source(), datasetName, kind, pattern);
+        return Objects.hash(source(), datasetName, kind, pattern, applyRequestFilter);
     }
 
     @Override
@@ -117,7 +127,10 @@ public class DatasetShadowRelation extends LeafPlan implements Unresolvable {
             return false;
         }
         DatasetShadowRelation other = (DatasetShadowRelation) obj;
-        return Objects.equals(datasetName, other.datasetName) && Objects.equals(kind, other.kind) && Objects.equals(pattern, other.pattern);
+        return Objects.equals(datasetName, other.datasetName)
+            && Objects.equals(kind, other.kind)
+            && Objects.equals(pattern, other.pattern)
+            && applyRequestFilter == other.applyRequestFilter;
     }
 
     @Override

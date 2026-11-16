@@ -95,7 +95,9 @@ public final class RequestFilterRewriter {
         Set<LogicalPlan> datasetsInsideViews = datasetsInsideViews(analyzed);
         FilterRewriter.RewriteResult result = FilterRewriter.rewrite(
             analyzed,
-            node -> node instanceof ExternalRelation && datasetsInsideViews.contains(node) == false,
+            node -> node instanceof ExternalRelation relation
+                && relation.applyRequestFilter()
+                && datasetsInsideViews.contains(node) == false,
             requestFilter,
             configuration,
             minimumVersion
@@ -179,19 +181,34 @@ public final class RequestFilterRewriter {
     }
 
     /**
-     * Warns that the filter was not applied to the plan's dataset leaves because a node is too old to evaluate it,
-     * naming them, when there are any.
+     * Warns that the filter was not applied to the plan's dataset leaves, naming them, when there are any.
+     * A leaf that still wants the filter is skipped because a node is too old to evaluate it. A leaf that set {@code apply_request_filter}
+     * to false is skipped for that reason instead.
      */
     private static void warnNotApplied(LogicalPlan plan) {
-        List<String> datasets = plan.collect(ExternalRelation.class::isInstance)
-            .stream()
-            .map(RequestFilterRewriter::name)
-            .distinct()
-            .toList();
-        if (datasets.isEmpty() == false) {
+        List<String> tooOld = new ArrayList<>();
+        List<String> optedOut = new ArrayList<>();
+        for (LogicalPlan node : plan.collect(ExternalRelation.class::isInstance)) {
+            ExternalRelation relation = (ExternalRelation) node;
+            String dataset = name(relation);
+            if (relation.applyRequestFilter()) {
+                if (tooOld.contains(dataset) == false) {
+                    tooOld.add(dataset);
+                }
+            } else if (optedOut.contains(dataset) == false) {
+                optedOut.add(dataset);
+            }
+        }
+        if (tooOld.isEmpty() == false) {
             HeaderWarning.addWarning(
                 "Request filter not applied to external datasets [{}], a node is too old to evaluate it; use WHERE instead",
-                String.join(", ", datasets)
+                String.join(", ", tooOld)
+            );
+        }
+        if (optedOut.isEmpty() == false) {
+            HeaderWarning.addWarning(
+                "Request filter not applied to external datasets [{}] because apply_request_filter is false",
+                String.join(", ", optedOut)
             );
         }
     }

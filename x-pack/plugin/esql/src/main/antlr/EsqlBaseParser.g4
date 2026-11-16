@@ -125,7 +125,12 @@ eqlCommand
     ;
 
 indexPatternAndMetadataFields
-    : indexPatternOrSubquery (COMMA indexPatternOrSubquery)* metadata?
+    : indexPatternOrSubquery (COMMA indexPatternOrSubquery)* metadata? sourceCommandNamedParameters
+    ;
+
+sourceCommandNamedParameters
+    : {EsqlCapabilities.Cap.APPLY_REQUEST_FILTER_SOURCE_OPTION.isEnabled()}? WITH mapExpression
+    |
     ;
 
 indexPatternOrSubquery

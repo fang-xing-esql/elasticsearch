@@ -57,6 +57,14 @@ public class ExternalRelationSerializationTests extends AbstractLogicalPlanSeria
         return randomExternalRelation();
     }
 
+    /** The flag is coordinator-only. A data node reconstructs it as true, including on the declared-schema version. */
+    public void testApplyRequestFilterIsNotOnTheWire() throws IOException {
+        ExternalRelation optedOut = randomExternalRelation().withApplyRequestFilter(false);
+        assertFalse(optedOut.applyRequestFilter());
+        assertTrue(copyInstance(optedOut, TransportVersion.current()).applyRequestFilter());
+        assertTrue(copyInstance(optedOut, TransportVersion.fromName("dataset_declared_schema")).applyRequestFilter());
+    }
+
     @Override
     protected ExternalRelation mutateInstance(ExternalRelation instance) throws IOException {
         String sourcePath = instance.sourcePath();

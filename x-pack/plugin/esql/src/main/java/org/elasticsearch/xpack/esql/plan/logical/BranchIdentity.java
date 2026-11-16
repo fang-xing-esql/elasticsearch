@@ -30,7 +30,12 @@ import java.util.List;
  * plain view's lineage is just its own name. It exists to answer a future {@code METADATA _lineage} and is not yet
  * consumed. (Tracked under esql-planning#2264.)
  */
-public record BranchIdentity(@Nullable String name, RelationClass kind, List<String> lineage) {
+public record BranchIdentity(@Nullable String name, RelationClass kind, List<String> lineage, boolean applyRequestFilter) {
+
+    /** Same identity, applying the request filter. Existing call sites use this. */
+    public BranchIdentity(@Nullable String name, RelationClass kind, List<String> lineage) {
+        this(name, kind, lineage, true);
+    }
 
     /** A bare index-pattern branch: the existing pre-analysis Lucene paths apply, nothing view-like to track. */
     public static final BranchIdentity INDEX = new BranchIdentity(null, RelationClass.INDEX, List.of());
@@ -39,7 +44,11 @@ public record BranchIdentity(@Nullable String name, RelationClass kind, List<Str
     public static final BranchIdentity SUBQUERY = new BranchIdentity(null, RelationClass.SUBQUERY, List.of());
 
     public static BranchIdentity view(String name) {
-        return new BranchIdentity(name, RelationClass.VIEW, List.of(name));
+        return view(name, true);
+    }
+
+    public static BranchIdentity view(String name, boolean applyRequestFilter) {
+        return new BranchIdentity(name, RelationClass.VIEW, List.of(name), applyRequestFilter);
     }
 
     /**
@@ -48,7 +57,15 @@ public record BranchIdentity(@Nullable String name, RelationClass kind, List<Str
      * still promotes to the view's identity when lifted — see {@link #liftedThrough}.
      */
     public static BranchIdentity dataset(String name) {
-        return new BranchIdentity(name, RelationClass.DATASET, List.of());
+        return dataset(name, true);
+    }
+
+    public static BranchIdentity dataset(String name, boolean applyRequestFilter) {
+        return new BranchIdentity(name, RelationClass.DATASET, List.of(), applyRequestFilter);
+    }
+
+    public BranchIdentity withApplyRequestFilter(boolean applyRequestFilter) {
+        return this.applyRequestFilter == applyRequestFilter ? this : new BranchIdentity(name, kind, lineage, applyRequestFilter);
     }
 
     public boolean isView() {
@@ -90,6 +107,6 @@ public record BranchIdentity(@Nullable String name, RelationClass kind, List<Str
         }
         List<String> chain = new ArrayList<>(outer.lineage);
         chain.addAll(lineage);
-        return new BranchIdentity(outer.name, RelationClass.VIEW, List.copyOf(chain));
+        return new BranchIdentity(outer.name, RelationClass.VIEW, List.copyOf(chain), outer.applyRequestFilter);
     }
 }

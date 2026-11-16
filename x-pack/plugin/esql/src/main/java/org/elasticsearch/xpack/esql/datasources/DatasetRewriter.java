@@ -32,6 +32,7 @@ import org.elasticsearch.xpack.esql.plan.IndexPattern;
 import org.elasticsearch.xpack.esql.plan.LinkedIndexPattern;
 import org.elasticsearch.xpack.esql.plan.logical.BranchIdentity;
 import org.elasticsearch.xpack.esql.plan.logical.BranchPlan;
+import org.elasticsearch.xpack.esql.plan.logical.CommandNamedParameters;
 import org.elasticsearch.xpack.esql.plan.logical.DatasetShadowRelation;
 import org.elasticsearch.xpack.esql.plan.logical.LogicalPlan;
 import org.elasticsearch.xpack.esql.plan.logical.UnresolvedExternalRelation;
@@ -443,8 +444,18 @@ public final class DatasetRewriter {
         LinkedHashMap<String, LogicalPlan> branches = new LinkedHashMap<>();
         LinkedHashMap<String, BranchIdentity> identities = new LinkedHashMap<>();
         for (String name : datasetNames) {
-            branches.put(name, buildDatasetBranch(name, datasets, dataSources, relation.source(), relation.metadataFields()));
-            identities.put(name, BranchIdentity.dataset(name));
+            branches.put(
+                name,
+                buildDatasetBranch(
+                    name,
+                    datasets,
+                    dataSources,
+                    relation.source(),
+                    relation.metadataFields(),
+                    relation.commandNamedParameters()
+                )
+            );
+            identities.put(name, BranchIdentity.dataset(name, relation.applyRequestFilter()));
         }
 
         // Index branch: the concrete local non-dataset names plus, under cross-project, any preserved positive
@@ -458,18 +469,8 @@ public final class DatasetRewriter {
         }
         if (indexBranch.isEmpty() == false) {
             // The null key marks the bare-plan branch, matching the ViewResolver/ViewCompaction convention.
-            branches.put(
-                null,
-                new UnresolvedRelation(
-                    relation.source(),
-                    new IndexPattern(relation.source(), String.join(",", indexBranch)),
-                    relation.frozen(),
-                    relation.metadataFields(),
-                    relation.indexMode(),
-                    relation.unresolvedMessage()
-                )
-            );
-            identities.put(null, BranchIdentity.INDEX);
+            branches.put(null, relation.withIndexPattern(new IndexPattern(relation.source(), String.join(",", indexBranch))));
+            identities.put(null, BranchIdentity.INDEX.withApplyRequestFilter(relation.applyRequestFilter()));
         }
 
         // Cap the real-read branches (datasets + the index branch) here, BEFORE the speculative shadows. A shadow
@@ -624,7 +625,8 @@ public final class DatasetRewriter {
         DatasetMetadata datasets,
         DataSourceMetadata dataSources,
         Source source,
-        List<NamedExpression> metadataFields
+        List<NamedExpression> metadataFields,
+        CommandNamedParameters commandNamedParameters
     ) {
         Dataset dataset = datasets.get(name);
         DataSource parent = dataSources.get(dataset.dataSource().getName());
@@ -636,7 +638,15 @@ public final class DatasetRewriter {
             );
         }
         Literal path = Literal.keyword(source, dataset.resource());
-        return new UnresolvedExternalRelation(source, path, datasetConfig(parent, dataset), metadataFields, name, dataset.mapping());
+        return new UnresolvedExternalRelation(
+            source,
+            path,
+            datasetConfig(parent, dataset),
+            metadataFields,
+            name,
+            dataset.mapping(),
+            commandNamedParameters
+        );
     }
 
     /**
@@ -692,7 +702,13 @@ public final class DatasetRewriter {
                 }
             }
             shadows.add(
-                new DatasetShadowRelation(relation.source(), name, LinkedIndexPattern.Kind.OPTIONAL, String.join(",", shadowPattern))
+                new DatasetShadowRelation(
+                    relation.source(),
+                    name,
+                    LinkedIndexPattern.Kind.OPTIONAL,
+                    String.join(",", shadowPattern),
+                    relation.applyRequestFilter()
+                )
             );
         }
         return shadows;

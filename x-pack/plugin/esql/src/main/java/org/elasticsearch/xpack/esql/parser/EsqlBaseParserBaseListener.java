@@ -218,6 +218,18 @@ public class EsqlBaseParserBaseListener implements EsqlBaseParserListener {
    *
    * <p>The default implementation does nothing.</p>
    */
+  @Override public void enterSourceCommandNamedParameters(EsqlBaseParser.SourceCommandNamedParametersContext ctx) { }
+  /**
+   * {@inheritDoc}
+   *
+   * <p>The default implementation does nothing.</p>
+   */
+  @Override public void exitSourceCommandNamedParameters(EsqlBaseParser.SourceCommandNamedParametersContext ctx) { }
+  /**
+   * {@inheritDoc}
+   *
+   * <p>The default implementation does nothing.</p>
+   */
   @Override public void enterIndexPatternOrSubquery(EsqlBaseParser.IndexPatternOrSubqueryContext ctx) { }
   /**
    * {@inheritDoc}

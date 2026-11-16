@@ -486,17 +486,7 @@ public class Analyzer extends ParameterizedRuleExecutor<LogicalPlan, AnalyzerCon
             List<NamedExpression> metadata = resolveMetadata(plan.metadataFields(), context);
             if (indexResolution == null || indexResolution.isValid() == false) {
                 String indexResolutionMessage = indexResolution == null ? "[none specified]" : indexResolution.toString();
-                return plan.unresolvedMessage().equals(indexResolutionMessage)
-                    ? plan
-                    : new UnresolvedRelation(
-                        plan.source(),
-                        plan.indexPattern(),
-                        plan.frozen(),
-                        metadata,
-                        plan.indexMode(),
-                        indexResolutionMessage,
-                        plan.telemetryLabel()
-                    );
+                return plan.unresolvedMessage().equals(indexResolutionMessage) ? plan : plan.withMetadata(metadata, indexResolutionMessage);
             }
             // assert indexResolution.matches(plan.indexPattern().indexPattern()) : "Expected index resolution to match the index pattern";
             IndexPattern table = plan.indexPattern();
@@ -509,19 +499,15 @@ public class Analyzer extends ParameterizedRuleExecutor<LogicalPlan, AnalyzerCon
                     metadata,
                     plan.indexMode(),
                     "invalid [" + table + "] resolution to [" + indexResolution + "]",
-                    plan.telemetryLabel()
+                    plan.telemetryLabel(),
+                    plan.commandNamedParameters()
                 );
             }
 
             if (metadata.stream().anyMatch(x -> x.resolved() == false)) {
-                return new UnresolvedRelation(
-                    plan.source(),
-                    plan.indexPattern(),
-                    plan.frozen(),
+                return plan.withMetadata(
                     metadata,
-                    plan.indexMode(),
-                    "unresolved metadata fields: " + metadata.stream().filter(x -> x.resolved() == false).toList(),
-                    plan.telemetryLabel()
+                    "unresolved metadata fields: " + metadata.stream().filter(x -> x.resolved() == false).toList()
                 );
             }
 
@@ -538,7 +524,7 @@ public class Analyzer extends ParameterizedRuleExecutor<LogicalPlan, AnalyzerCon
                 esIndex.concreteIndices(),
                 esIndex.indexProperties(),
                 attributes.isEmpty() ? NO_FIELDS : attributes
-            );
+            ).withApplyRequestFilter(plan.applyRequestFilter());
         }
 
         private static List<NamedExpression> resolveMetadata(List<NamedExpression> metadata, AnalyzerContext context) {
@@ -676,7 +662,7 @@ public class Analyzer extends ParameterizedRuleExecutor<LogicalPlan, AnalyzerCon
                 esIndex.concreteIndices(),
                 esIndex.indexProperties(),
                 attributes.isEmpty() ? NO_FIELDS : attributes
-            );
+            ).withApplyRequestFilter(shadow.applyRequestFilter());
         }
     }
 
@@ -841,7 +827,7 @@ public class Analyzer extends ParameterizedRuleExecutor<LogicalPlan, AnalyzerCon
                 esIndex.concreteIndices(),
                 esIndex.indexProperties(),
                 attributes.isEmpty() ? NO_FIELDS : attributes
-            );
+            ).withApplyRequestFilter(shadow.applyRequestFilter());
         }
     }
 
@@ -923,7 +909,7 @@ public class Analyzer extends ParameterizedRuleExecutor<LogicalPlan, AnalyzerCon
                 bindResult.unresolvedMetadata(),
                 resolvedSource.declaredReadSpec()
             );
-            return relation;
+            return relation.withApplyRequestFilter(plan.applyRequestFilter());
         }
 
         /**

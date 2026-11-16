@@ -137,6 +137,7 @@ import org.elasticsearch.xpack.esql.plan.logical.ExternalRelation;
 import org.elasticsearch.xpack.esql.plan.logical.InlineStats;
 import org.elasticsearch.xpack.esql.plan.logical.LogicalPlan;
 import org.elasticsearch.xpack.esql.plan.logical.Row;
+import org.elasticsearch.xpack.esql.plan.logical.SourceCommandNamedParameters;
 import org.elasticsearch.xpack.esql.plan.logical.UnresolvedIpLocation;
 import org.elasticsearch.xpack.esql.plan.logical.UnresolvedRelation;
 import org.elasticsearch.xpack.esql.plan.logical.join.AbstractSubqueryJoin;
@@ -509,6 +510,12 @@ public class EsqlSession {
             // The traversal-based command telemetry only sees the unwrapped query, so count the
             // EXPLAIN command itself here.
             planTelemetry.command(explain);
+        }
+        if (request.filter() == null) {
+            SourceCommandNamedParameters.rejectWithoutRequestFilter(parsedPlan);
+            for (var binding : statement.letBindings()) {
+                SourceCommandNamedParameters.rejectWithoutRequestFilter(binding.plan());
+            }
         }
         parsingProfile.stop();
 
@@ -2066,6 +2073,8 @@ public class EsqlSession {
                 result,
                 requestFilter,
                 viewInternalIndexPatterns(parsed),
+                SourceCommandNamedParameters.optedOutIndexPatterns(parsed),
+                SourceCommandNamedParameters.optedOutLinkedPatterns(parsed),
                 l
             )
         ).andThenApply(r -> {
@@ -2432,9 +2441,13 @@ public class EsqlSession {
         // QueryDslTimestampBoundsExtractor parses both ends with roundUp=false, so
         // `lte now/y` is start-of-year. Including that Instant in year IN is safe
         // only while listing is year grain.
+        // Drop listing bounds only when every reference to the path opted out. One reference that still applies the
+        // request filter keeps the bounds, so its file list and schema stay inside the filter window.
+        Map<String, Map<String, Object>> boundedPathConfigs = new HashMap<>(pathConfigs);
+        boundedPathConfigs.keySet().removeAll(SourceCommandNamedParameters.fullyOptedOutExternalPaths(plan));
         var withBounds = PartitionSpec.addTimestampBounds(
             PartitionFilterHintExtractor.extract(listingPlan),
-            pathConfigs,
+            boundedPathConfigs,
             listingBounds == null ? null : listingBounds.start(),
             listingBounds == null ? null : listingBounds.end()
         );
@@ -2839,6 +2852,8 @@ public class EsqlSession {
         PreAnalysisResult result,
         QueryBuilder requestFilter,
         Set<IndexPattern> viewInternalPatterns,
+        Set<IndexPattern> optedOutPatterns,
+        Set<String> optedOutLinkedPatterns,
         ActionListener<PreAnalysisResult> listener
     ) {
         assert ThreadPool.assertCurrentThreadPool(
@@ -2872,8 +2887,8 @@ public class EsqlSession {
                     e.getKey().isInsideView() ? e.getKey().viewLoadsUnmappedFields() : trackUnmappedFieldIndices,
                     namedFields,
                     r,
-                    // A pattern reachable only inside a view branch must not be pruned by the request filter.
-                    viewInternalPatterns.contains(e.getKey()) ? null : requestFilter,
+                    // A pattern reachable only inside a view branch, or a command that opted out, must not be pruned.
+                    viewInternalPatterns.contains(e.getKey()) || optedOutPatterns.contains(e.getKey()) ? null : requestFilter,
                     l
                 ),
                 listener
@@ -2898,8 +2913,8 @@ public class EsqlSession {
                     e.getKey().isInsideView() ? e.getKey().viewLoadsUnmappedFields() : trackUnmappedFieldIndices,
                     namedFields,
                     r,
-                    // A pattern reachable only inside a view branch must not be pruned by the request filter.
-                    viewInternalPatterns.contains(e.getKey()) ? null : requestFilter,
+                    // A pattern reachable only inside a view branch, or a command that opted out, must not be pruned.
+                    viewInternalPatterns.contains(e.getKey()) || optedOutPatterns.contains(e.getKey()) ? null : requestFilter,
                     routingInfoCapture,
                     l
                 ),
@@ -2915,7 +2930,7 @@ public class EsqlSession {
                             trackUnmappedFieldIndices,
                             namedFields,
                             r,
-                            requestFilter,
+                            optedOutLinkedPatterns.contains(sp.pattern().indexPattern()) ? null : requestFilter,
                             ll
                         ),
                         l
