@@ -25,7 +25,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * <p>
  * Expired streams are not evicted. They stay until {@link #delete} is called.
  * Stored pages are owned by the store and released on delete.
- * Pages returned from {@link #getPages} are shallow copies that the caller must close.
+ * Pages returned from {@link #getPages} and {@link #getPageBatch} are shallow copies that the caller must close.
  * <p>
  * Offsets are row positions in the overall result. {@code expirationMillis} is an absolute epoch time.
  */
@@ -104,6 +104,20 @@ public class InMemoryStreamStore implements StreamStorage {
     @Override
     public void getPages(String streamId, long offset, long rows, ActionListener<List<Page>> listener) {
         ActionListener.completeWith(listener, () -> get(streamId).getPages(offset, rows));
+    }
+
+    /**
+     * Returns up to {@code maxPages} whole pages, starting with the page that contains row {@code fromOffset}. The stored size of a
+     * page is its size in memory.
+     */
+    @Override
+    public void getPageBatch(String streamId, long fromOffset, int maxPages, long maxBytes, ActionListener<PageBatch> listener) {
+        ActionListener.completeWith(listener, () -> {
+            if (maxPages < 1) {
+                throw new IllegalArgumentException("[maxPages] must be at least 1 but was [" + maxPages + "]");
+            }
+            return get(streamId).getPageBatch(fromOffset, maxPages, maxBytes);
+        });
     }
 
     @Override
@@ -258,6 +272,31 @@ public class InMemoryStreamStore implements StreamStorage {
                 throw e;
             }
             return result;
+        }
+
+        synchronized PageBatch getPageBatch(long fromOffset, int maxPages, long maxBytes) {
+            ensureOpen();
+            List<StoredPage> result = new ArrayList<>();
+            long bytes = 0;
+            try {
+                for (Entry entry : pages) {
+                    if (entry.offset() + entry.size() <= fromOffset) {
+                        continue;
+                    }
+                    long pageBytes = entry.page().ramBytesUsedByBlocks();
+                    result.add(new StoredPage(entry.offset(), entry.page().shallowCopy(), pageBytes));
+                    bytes += pageBytes;
+                    if (result.size() >= maxPages || (maxBytes > 0 && bytes >= maxBytes)) {
+                        break;
+                    }
+                }
+            } catch (RuntimeException e) {
+                for (StoredPage page : result) {
+                    page.page().releaseBlocks();
+                }
+                throw e;
+            }
+            return new PageBatch(fromOffset, result);
         }
 
         synchronized void close() {

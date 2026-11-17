@@ -94,11 +94,13 @@ import org.elasticsearch.xpack.esql.action.EsqlResolveDatasetAction;
 import org.elasticsearch.xpack.esql.action.EsqlResolveFieldsAction;
 import org.elasticsearch.xpack.esql.action.EsqlResolveViewAction;
 import org.elasticsearch.xpack.esql.action.EsqlSearchShardsAction;
+import org.elasticsearch.xpack.esql.action.EsqlStreamGetResultAction;
 import org.elasticsearch.xpack.esql.action.EsqlStreamQueryAction;
 import org.elasticsearch.xpack.esql.action.PreparedEsqlQueryRequest;
 import org.elasticsearch.xpack.esql.action.RestEsqlAsyncQueryAction;
 import org.elasticsearch.xpack.esql.action.RestEsqlDeleteAsyncResultAction;
 import org.elasticsearch.xpack.esql.action.RestEsqlGetAsyncResultAction;
+import org.elasticsearch.xpack.esql.action.RestEsqlGetStreamResultAction;
 import org.elasticsearch.xpack.esql.action.RestEsqlListQueriesAction;
 import org.elasticsearch.xpack.esql.action.RestEsqlQueryAction;
 import org.elasticsearch.xpack.esql.action.RestEsqlStopAsyncAction;
@@ -205,6 +207,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
+
+import static org.elasticsearch.xpack.esql.action.EsqlCapabilities.Cap.STREAMING_V2;
 
 public class EsqlPlugin extends Plugin implements ActionPlugin, ExtensiblePlugin, SearchPlugin, ShutdownAwarePlugin, SystemIndexPlugin {
 
@@ -812,6 +816,7 @@ public class EsqlPlugin extends Plugin implements ActionPlugin, ExtensiblePlugin
             new ActionHandler(EsqlQueryAction.INSTANCE, TransportEsqlQueryAction.class),
             new ActionHandler(EsqlStreamQueryAction.INSTANCE, TransportEsqlStreamQueryAction.class),
             new ActionHandler(EsqlAsyncGetResultAction.INSTANCE, TransportEsqlAsyncGetResultsAction.class),
+            new ActionHandler(EsqlStreamGetResultAction.INSTANCE, TransportEsqlStreamGetResultsAction.class),
             new ActionHandler(EsqlStatsAction.INSTANCE, TransportEsqlStatsAction.class),
             new ActionHandler(XPackUsageFeatureAction.ESQL, EsqlUsageTransportAction.class),
             new ActionHandler(XPackInfoFeatureAction.ESQL, EsqlInfoTransportAction.class),
@@ -909,6 +914,10 @@ public class EsqlPlugin extends Plugin implements ActionPlugin, ExtensiblePlugin
             handlers.add(new RestPutDatasetAction(dataSourceSecretSettingNames));
             handlers.add(new RestGetDatasetAction());
             handlers.add(new RestDeleteDatasetAction());
+        }
+        // The stream endpoints are available only where streaming is, which is snapshot builds while the protocol is still changing.
+        if (STREAMING_V2.isEnabled()) {
+            handlers.add(new RestEsqlGetStreamResultAction());
         }
         return handlers;
     }

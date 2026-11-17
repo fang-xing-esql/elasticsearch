@@ -8,6 +8,7 @@
 package org.elasticsearch.xpack.esql.streaming;
 
 import org.elasticsearch.ElasticsearchException;
+import org.elasticsearch.ElasticsearchStatusException;
 import org.elasticsearch.ExceptionsHelper;
 import org.elasticsearch.core.Nullable;
 import org.elasticsearch.rest.RestStatus;
@@ -29,16 +30,24 @@ public record StreamMetadata(
     @Nullable StreamCompletionInfo completionInfo
 ) {
 
-    enum Status {
+    public enum Status {
         RUNNING,
         COMPLETE,
         FAILED,
         CANCELED
     }
 
-    record StreamCompletionInfo(boolean partial, long tookMillis, Long pages, Long rows, @Nullable StreamFailure failure) {}
+    public record StreamCompletionInfo(boolean partial, long tookMillis, Long pages, Long rows, @Nullable StreamFailure failure) {}
 
-    record StreamFailure(String type, @Nullable String reason, RestStatus status) {
+    public record StreamFailure(String type, @Nullable String reason, RestStatus status) {
+
+        /**
+         * The exception that was stored is gone, only its type, reason and status were kept, so this is a generic status exception that
+         * carries the stored reason and status. The original exception type is available in {@link #type()}.
+         */
+        public ElasticsearchStatusException toException() {
+            return new ElasticsearchStatusException(reason, status);
+        }
 
         static StreamFailure of(Exception exception) {
             Throwable cause = ExceptionsHelper.unwrapCause(exception);
