@@ -26,12 +26,12 @@ public record StreamMetadata(
     @Nullable StreamCompletionInfo completionInfo
 ) {
 
-    enum Status {
+    public enum Status {
         RUNNING,
         COMPLETE,
         FAILED,
         CANCELED
     }
 
-    record StreamCompletionInfo(boolean partial, long tookMillis, long pages, long rows, @Nullable Exception exception) {}
+    public record StreamCompletionInfo(boolean partial, long tookMillis, long pages, long rows, @Nullable Exception exception) {}
 }
